@@ -63,13 +63,12 @@ class MarketEntityMatcher {
     private crossEncoder!: PreTrainedModel;
 
     async init(biModelName = 'Xenova/bge-small-en-v1.5', crossModelName = 'Xenova/bge-reranker-base') {
-        console.log(`Loading Bi-Encoder (${biModelName})...`);
+        console.log(`Loading Bi-Encoder (${biModelName}) in 8-bit quantization...`);
+        this.biEncoder = (await pipeline('feature-extraction', biModelName, { dtype: 'q8' }) as any) as FeatureExtractionPipeline;
 
-        this.biEncoder = (await pipeline('feature-extraction', biModelName) as any) as FeatureExtractionPipeline;
-
-        console.log(`Loading Cross-Encoder (${crossModelName})...`);
+        console.log(`Loading Cross-Encoder (${crossModelName}) in 8-bit quantization...`);
         this.crossTokenizer = await AutoTokenizer.from_pretrained(crossModelName);
-        this.crossEncoder = await AutoModelForSequenceClassification.from_pretrained(crossModelName);
+        this.crossEncoder = await AutoModelForSequenceClassification.from_pretrained(crossModelName, { dtype: 'q8' });
     }
 
     // Mathematical Dot Product for Normalized Vectors
@@ -81,83 +80,68 @@ class MarketEntityMatcher {
         return dot;
     }
 
-    async processAllMarkets(markets: UnifiedMarket[], initialThreshold: number = 0.3) {
+    async processAllMarkets(markets: UnifiedMarket[], initialThreshold: number = 0.82, topK: number = 3) {
         // --- STAGE 1: Bi-Encoder Embedding ---
         console.log(`\nGenerating embeddings for ${markets.length} markets...`);
         for (let i = 0; i < markets.length; i++) {
-            // pooling: 'mean' and normalize: true compress and normalize the vector space natively
             const output = await this.biEncoder(markets[i].embedding_text, { pooling: 'mean', normalize: true });
             markets[i].embedding = Array.from(output.data);
 
-            if (i > 0 && i % 1000 === 0) console.log(`Embedded ${i} / ${markets.length} markets...`);
+            process.stdout.write(`\rEmbedded ${i} / ${markets.length} markets...`);
+
         }
 
-        // --- STAGE 2: Brute-Force Dot Product (Candidate Generation) ---
-        console.log("\nRunning N^2 Brute-Force candidate generation...");
-        const crossInputs: { textA: string, textB: string }[] = [];
-        const hitMapping: [number, number][] = [];
+        // --- STAGE 2: Top-K Bipartite Candidate Generation ---
+        console.log(`\n\nRunning cross-platform Top-${topK} candidate generation...`);
 
-        for (let i = 0; i < markets.length; i++) {
-            for (let j = i + 1; j < markets.length; j++) {
-                const sim = this.dotProduct(markets[i].embedding!, markets[j].embedding!);
+        const polymarkets = markets.filter(m => m.platform === 'polymarket');
+        const kalshis = markets.filter(m => m.platform === 'kalshi');
+
+        const candidatePairs: { polyMarket: Omit<UnifiedMarket, 'embedding'>, kalshiMarket: Omit<UnifiedMarket, 'embedding'>, score: number }[] = [];
+
+        // Helper to immutably remove the embedding array before saving
+        const stripEmbedding = (market: UnifiedMarket) => {
+            const { embedding, ...cleanMarket } = market;
+            return cleanMarket;
+        };
+
+        let processed = 0;
+
+        // Iterate through each Polymarket
+        for (let i = 0; i < polymarkets.length; i++) {
+            let currentMatches: { kalshiMarket: UnifiedMarket, score: number }[] = [];
+
+            for (let j = 0; j < kalshis.length; j++) {
+                const sim = this.dotProduct(polymarkets[i].embedding!, kalshis[j].embedding!);
 
                 if (sim >= initialThreshold) {
-                    crossInputs.push({
-                        textA: markets[i].embedding_text,
-                        textB: markets[j].embedding_text
-                    });
-                    hitMapping.push([i, j]);
-                }
-            }
-        }
-
-        console.log(`Found ${crossInputs.length} candidate pairs above ${initialThreshold} similarity.`);
-        if (crossInputs.length === 0) return [];
-
-        // --- STAGE 3: Cross-Encoder Re-Ranking ---
-        console.log(`\nRe-ranking ${crossInputs.length} pairs using Cross-Encoder...`);
-
-        const uf = new UnionFind();
-        let confirmedMatches = 0;
-
-        // Process in batches to manage memory allocation for tensor creation
-        const batchSize = 16;
-        for (let i = 0; i < crossInputs.length; i += batchSize) {
-            const batch = crossInputs.slice(i, i + batchSize);
-            const batchMappings = hitMapping.slice(i, i + batchSize);
-
-            // Tokenize sentence pairs
-            const inputs = this.crossTokenizer(
-                batch.map(b => b.textA),
-                { text_pair: batch.map(b => b.textB), padding: true, truncation: true }
-            );
-
-            // Run Cross-Encoder inference
-            const { logits } = await this.crossEncoder(inputs);
-            const scores = logits.data;
-
-            for (let k = 0; k < batch.length; k++) {
-                // Reranker logit > 0 implies strong relevance
-                if (scores[k] > 0) {
-                    const [idxA, idxB] = batchMappings[k];
-                    uf.union(markets[idxA].internal_id, markets[idxB].internal_id);
-                    confirmedMatches++;
+                    currentMatches.push({ kalshiMarket: kalshis[j], score: sim });
                 }
             }
 
-            if (i > 0 && i % 160 === 0) console.log(`Re-ranked ${i} pairs...`);
+            // Sort this Polymarket's matches by highest score first
+            currentMatches.sort((a, b) => b.score - a.score);
+
+            // Slice only the top K matches and push the CLEANED versions to our final list
+            const bestTopK = currentMatches.slice(0, topK);
+            for (const match of bestTopK) {
+                candidatePairs.push({
+                    polyMarket: stripEmbedding(polymarkets[i]),
+                    kalshiMarket: stripEmbedding(match.kalshiMarket),
+                    score: match.score
+                });
+            }
+
+            processed++;
+
+            process.stdout.write(`\rEvaluated ${processed} / ${polymarkets.length} Polymarkets... Accumulated ${candidatePairs.length} candidates.`);
+
         }
 
-        console.log(`\nFinal Cross-Encoder confirmed ${confirmedMatches} highly linked pairs.`);
+        console.log(`\n\nFiltering complete. Found ${candidatePairs.length} highly correlated Top-${topK} pairs above ${initialThreshold} similarity.`);
 
-        // --- STAGE 4: Final Compilation ---
-        const validGroups = Array.from(uf.getGroups().values()).filter(group => group.length > 1);
-
-        const finalGroups = validGroups.map(groupIds => {
-            return groupIds.map(id => markets.find(m => m.internal_id === id)!);
-        });
-
-        return finalGroups;
+        // Sort final list by highest confidence
+        return candidatePairs.sort((a, b) => b.score - a.score);
     }
 }
 
@@ -171,7 +155,7 @@ async function run() {
     // Using BGE-Small as a lighter equivalent to Base to guarantee Node doesn't OOM.
     await matcher.init('Xenova/bge-small-en-v1.5', 'Xenova/bge-reranker-base');
 
-    const groupedMarkets = await matcher.processAllMarkets(markets, 0.3);
+    const groupedMarkets = await matcher.processAllMarkets(markets, 0.85);
 
     fs.writeFileSync('candidate_market_groups.json', JSON.stringify(groupedMarkets, null, 2));
     console.log(`\nSuccess! Saved ${groupedMarkets.length} isolated groups to candidate_market_groups.json`);

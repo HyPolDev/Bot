@@ -8,3 +8,4 @@ coverage
 *.csv
 .csv
 unified_markets.json
+candidate_market_groups.json
