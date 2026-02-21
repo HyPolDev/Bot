@@ -1,0 +1,18 @@
+{
+  "name": "arbitrager",
+  "version": "1.0.0",
+  "description": "Prediction market arbitrager",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "fs": "^0.0.1-security"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0"
+  }
+}

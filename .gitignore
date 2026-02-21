@@ -1,0 +1,9 @@
+node_modules
+.env
+dist
+coverage
+*.log
+.idea
+.vscode
+*.csv
+.csv
