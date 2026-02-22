@@ -7,14 +7,17 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "setup": "chmod +x setup/llm_setup.sh && ./setup/llm_setup.sh"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "cli-progress": "^3.12.0",
     "csv-parser": "^3.2.0",
     "fs": "^0.0.1-security"
   },
   "devDependencies": {
+    "@types/cli-progress": "^3.11.6",
     "@types/node": "^25.3.0"
   }
 }

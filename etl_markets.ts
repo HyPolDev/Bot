@@ -12,25 +12,28 @@ interface UnifiedMarket {
     market_question: string;
     market_rules: string;
     outcomes: string[];
-    embedding_text: string;
+    embedding_text: string; // Used for Vector Search (Short & Unique)
 }
 
 const unifiedMarkets: UnifiedMarket[] = [];
 
-// 2. The Streaming CSV Parser
-function parseCSV(
-    filePath: string,
-    mapper: (row: any) => UnifiedMarket | null
-): Promise<void> {
+// Helper to extract a readable date
+const formatDate = (isoString: string) => {
+    if (!isoString) return '';
+    try {
+        return new Date(isoString).toISOString().split('T')[0]; // YYYY-MM-DD
+    } catch {
+        return '';
+    }
+}
+
+function parseCSV(filePath: string, mapper: (row: any) => UnifiedMarket | null): Promise<void> {
     return new Promise((resolve, reject) => {
         fs.createReadStream(filePath)
             .pipe(csv())
             .on('data', (row) => {
                 const mappedData = mapper(row);
-                // Only push valid rows that passed our mapping logic
-                if (mappedData) {
-                    unifiedMarkets.push(mappedData);
-                }
+                if (mappedData) unifiedMarkets.push(mappedData);
             })
             .on('end', () => {
                 console.log(`Finished parsing ${filePath}`);
@@ -40,33 +43,35 @@ function parseCSV(
     });
 }
 
-// 3. Platform-Specific Transformation Logic
+// --- Platform Logic ---
+
 const mapKalshi = (row: any): UnifiedMarket | null => {
     const question = row.title || "";
+    // Kalshi rules are split; combine them
     const rules = `${row.rules_primary || ""} ${row.rules_secondary || ""}`.trim();
+    const date = formatDate(row.expiration_time);
 
-    // Discard rows missing critical identifiers
     if (!row.ticker || !question) return null;
 
     return {
         internal_id: row.ticker,
         platform: 'kalshi',
-        original_url_slug: row.ticker, // Kalshi uses the ticker as the slug
+        original_url_slug: row.ticker,
         volume_usd: parseFloat(row.volume) || 0,
         market_question: question,
         market_rules: rules,
-        outcomes: ['Yes', 'No'], // Kalshi is natively binary
-        embedding_text: `Question: ${question}. Rules: ${rules}. Outcomes: Yes, No.`
+        outcomes: ['Yes', 'No'],
+        embedding_text: `${question} | Expires: ${date}`
     };
 };
 
 const mapPolymarket = (row: any): UnifiedMarket | null => {
     const question = row.question || "";
     const rules = row.description || "";
+    const date = formatDate(row.endDateIso || row.endDate);
 
     if (!row.id || !question) return null;
 
-    // Safely parse the Polymarket outcomes array
     let parsedOutcomes: string[] = [];
     try {
         parsedOutcomes = row.outcomes ? JSON.parse(row.outcomes) : [];
@@ -82,25 +87,21 @@ const mapPolymarket = (row: any): UnifiedMarket | null => {
         market_question: question,
         market_rules: rules,
         outcomes: parsedOutcomes,
-        embedding_text: `Question: ${question}. Rules: ${rules}. Outcomes: ${parsedOutcomes.join(', ')}.`
+        // DENSE EMBEDDING: Question + Date only.
+        embedding_text: `${question} | Expires: ${date}`
     };
 };
 
-// 4. Main Execution Function
+// --- Execution ---
+
 async function runETL() {
     console.log("Starting Extract & Transform pipeline...");
-
     try {
         await parseCSV('kalshi_markets.csv', mapKalshi);
         await parseCSV('polymarket_markets.csv', mapPolymarket);
-
         console.log(`Successfully mapped ${unifiedMarkets.length} total markets.`);
-
-        // 5. Load (Checkpoint Creation)
-        const outputPath = 'unified_markets.json';
-        fs.writeFileSync(outputPath, JSON.stringify(unifiedMarkets, null, 2));
-        console.log(`Checkpoint saved successfully to ${outputPath}`);
-
+        fs.writeFileSync('unified_markets.json', JSON.stringify(unifiedMarkets, null, 2));
+        console.log(`Checkpoint saved successfully to unified_markets.json`);
     } catch (error) {
         console.error("ETL Pipeline failed:", error);
     }

@@ -21,42 +21,8 @@ interface UnifiedMarket {
     embedding?: number[];
 }
 
-// 2. Union-Find for Graph Grouping
-class UnionFind {
-    private parent: Map<string, string> = new Map();
 
-    find(i: string): string {
-        if (!this.parent.has(i)) {
-            this.parent.set(i, i);
-        }
-        if (this.parent.get(i) !== i) {
-            this.parent.set(i, this.find(this.parent.get(i)!));
-        }
-        return this.parent.get(i)!;
-    }
-
-    union(i: string, j: string): void {
-        const rootI = this.find(i);
-        const rootJ = this.find(j);
-        if (rootI !== rootJ) {
-            this.parent.set(rootI, rootJ);
-        }
-    }
-
-    getGroups(): Map<string, string[]> {
-        const groups = new Map<string, string[]>();
-        for (const [node] of this.parent) {
-            const root = this.find(node);
-            if (!groups.has(root)) {
-                groups.set(root, []);
-            }
-            groups.get(root)!.push(node);
-        }
-        return groups;
-    }
-}
-
-// 3. The Matcher Class
+// 2. The Matcher Class
 class MarketEntityMatcher {
     private biEncoder!: FeatureExtractionPipeline;
     private crossTokenizer!: PreTrainedTokenizer;
@@ -145,7 +111,7 @@ class MarketEntityMatcher {
     }
 }
 
-// 4. Main Execution
+// 3. Main Execution
 async function run() {
     console.log("Loading unified_markets.json...");
     const rawData = fs.readFileSync('unified_markets.json', 'utf-8');
