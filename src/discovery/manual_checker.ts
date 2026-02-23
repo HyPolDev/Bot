@@ -26,7 +26,7 @@ interface CandidatePair {
 async function run() {
     const DATA_DIR = path.posix.join(process.cwd(), 'data');
 
-    const inputFile = './test/__fixtures__/test_candidate_market_groups.json';
+    const inputFile = path.posix.join(DATA_DIR, 'candidate_market_groups.json');
     const outputFile = path.posix.join(DATA_DIR, 'market_pairs.json');
 
     if (!fs.existsSync(inputFile)) {
