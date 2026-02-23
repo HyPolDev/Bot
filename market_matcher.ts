@@ -1,3 +1,4 @@
+import { rankMarketsByScoreAndTime } from './utils/ranker.ts';
 import fs from 'fs';
 import {
     pipeline,
@@ -17,6 +18,7 @@ interface UnifiedMarket {
     market_question: string;
     market_rules: string;
     outcomes: string[];
+    expiration: string;
     embedding_text: string;
     embedding?: number[];
 }
@@ -123,8 +125,13 @@ async function run() {
 
     const groupedMarkets = await matcher.processAllMarkets(markets, 0.85);
 
-    fs.writeFileSync('candidate_market_groups.json', JSON.stringify(groupedMarkets, null, 2));
-    console.log(`\nSuccess! Saved ${groupedMarkets.length} isolated groups to candidate_market_groups.json`);
+    console.log(`\nRanking ${groupedMarkets.length} candidates by similarity and expiration date...`);
+
+    const rankedMarkets = rankMarketsByScoreAndTime(groupedMarkets, 0.001, 5.00);
+
+    fs.writeFileSync('candidate_market_groups.json', JSON.stringify(rankedMarkets, null, 2));
+
+    console.log(`\nSuccess! Saved ${rankedMarkets.length} ranked isolated groups to candidate_market_groups.json`);
 }
 
 run();

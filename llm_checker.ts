@@ -10,6 +10,7 @@ interface UnifiedMarket {
     market_question: string;
     market_rules: string;
     outcomes: string[];
+    expiration: string;
     embedding_text: string;
 }
 

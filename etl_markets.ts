@@ -12,7 +12,8 @@ interface UnifiedMarket {
     market_question: string;
     market_rules: string;
     outcomes: string[];
-    embedding_text: string; // Used for Vector Search (Short & Unique)
+    expiration: string;
+    embedding_text: string;
 }
 
 const unifiedMarkets: UnifiedMarket[] = [];
@@ -61,6 +62,7 @@ const mapKalshi = (row: any): UnifiedMarket | null => {
         market_question: question,
         market_rules: rules,
         outcomes: ['Yes', 'No'],
+        expiration: `${date}`,
         embedding_text: `${question} | Expires: ${date}`
     };
 };
@@ -87,7 +89,7 @@ const mapPolymarket = (row: any): UnifiedMarket | null => {
         market_question: question,
         market_rules: rules,
         outcomes: parsedOutcomes,
-        // DENSE EMBEDDING: Question + Date only.
+        expiration: `${date}`,
         embedding_text: `${question} | Expires: ${date}`
     };
 };
