@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import path from 'path';
 
 // Helper function to replicate time.sleep()
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -102,7 +103,8 @@ async function getAllActiveKalshiMarkets() {
     });
 
     // --- SAVE TO CSV ---
-    const csvFilename = "kalshi_markets.csv";
+    const DATA_DIR = path.posix.join(process.cwd(), 'data');
+    const csvFilename = path.posix.join(DATA_DIR, 'kalshi_markets.csv');
     console.log(`Saving to ${csvFilename}...`);
 
     try {

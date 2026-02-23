@@ -1,5 +1,6 @@
 import fs from 'fs';
 import csv from 'csv-parser';
+import path from 'path';
 
 // 1. Define the Unified Interface
 type Platform = 'polymarket' | 'kalshi';
@@ -99,11 +100,25 @@ const mapPolymarket = (row: any): UnifiedMarket | null => {
 async function runETL() {
     console.log("Starting Extract & Transform pipeline...");
     try {
-        await parseCSV('kalshi_markets.csv', mapKalshi);
-        await parseCSV('polymarket_markets.csv', mapPolymarket);
+        const DATA_DIR = path.posix.join(process.cwd(), 'data');
+
+        if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+        }
+
+        const kalshiCsvPath = path.posix.join(DATA_DIR, 'kalshi_markets.csv');
+        const polyCsvPath = path.posix.join(DATA_DIR, 'polymarket_markets.csv');
+        const unifiedJsonPath = path.posix.join(DATA_DIR, 'unified_markets.json');
+
+        await parseCSV(kalshiCsvPath, mapKalshi);
+        await parseCSV(polyCsvPath, mapPolymarket);
+
         console.log(`Successfully mapped ${unifiedMarkets.length} total markets.`);
-        fs.writeFileSync('unified_markets.json', JSON.stringify(unifiedMarkets, null, 2));
-        console.log(`Checkpoint saved successfully to unified_markets.json`);
+
+        // 5. Save the output
+        fs.writeFileSync(unifiedJsonPath, JSON.stringify(unifiedMarkets, null, 2));
+
+        console.log(`Checkpoint saved successfully to ${unifiedJsonPath}`);
     } catch (error) {
         console.error("ETL Pipeline failed:", error);
     }

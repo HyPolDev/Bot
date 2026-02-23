@@ -11,3 +11,5 @@ unified_markets.json
 candidate_market_groups.json
 test_candidate_market_groups.json
 market_pairs.json
+/data/*
+!/data/.gitkeep

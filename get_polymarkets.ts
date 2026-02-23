@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import path from 'path';
 
 // Helper function to replicate time.sleep()
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -93,7 +94,8 @@ async function getAllActivePolymarketMarkets() {
     });
 
     // --- SAVE TO CSV ---
-    const csvFilename = "polymarket_markets.csv";
+    const DATA_DIR = path.posix.join(process.cwd(), 'data');
+    const csvFilename = path.posix.join(DATA_DIR, 'polymarket_markets.csv');
     console.log(`Saving to ${csvFilename}...`);
 
     try {

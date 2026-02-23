@@ -1,4 +1,5 @@
 import { rankMarketsByScoreAndTime } from './utils/ranker.ts';
+import path from 'path';
 import fs from 'fs';
 import {
     pipeline,
@@ -115,12 +116,20 @@ class MarketEntityMatcher {
 
 // 3. Main Execution
 async function run() {
-    console.log("Loading unified_markets.json...");
-    const rawData = fs.readFileSync('unified_markets.json', 'utf-8');
+    const DATA_DIR = path.posix.join(process.cwd(), 'data');
+
+    if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+
+    const inputPath = path.posix.join(DATA_DIR, 'unified_markets.json');
+    const outputPath = path.posix.join(DATA_DIR, 'candidate_market_groups.json');
+
+    console.log(`Loading ${inputPath}...`);
+    const rawData = fs.readFileSync(inputPath, 'utf-8');
     const markets: UnifiedMarket[] = JSON.parse(rawData);
 
     const matcher = new MarketEntityMatcher();
-    // Using BGE-Small as a lighter equivalent to Base to guarantee Node doesn't OOM.
     await matcher.init('Xenova/bge-small-en-v1.5', 'Xenova/bge-reranker-base');
 
     const groupedMarkets = await matcher.processAllMarkets(markets, 0.85);
@@ -129,9 +138,9 @@ async function run() {
 
     const rankedMarkets = rankMarketsByScoreAndTime(groupedMarkets, 0.001, 5.00);
 
-    fs.writeFileSync('candidate_market_groups.json', JSON.stringify(rankedMarkets, null, 2));
+    fs.writeFileSync(outputPath, JSON.stringify(rankedMarkets, null, 2));
 
-    console.log(`\nSuccess! Saved ${rankedMarkets.length} ranked isolated groups to candidate_market_groups.json`);
+    console.log(`\nSuccess! Saved ${rankedMarkets.length} ranked isolated groups to ${outputPath}`);
 }
 
 run();

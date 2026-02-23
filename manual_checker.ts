@@ -1,6 +1,7 @@
 import fs from 'fs';
 import * as readline from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
+import path from 'path';
 
 // 1. Define Structures matching your Vector Search output
 interface UnifiedMarket {
@@ -23,8 +24,10 @@ interface CandidatePair {
 
 // 2. Main Execution
 async function run() {
+    const DATA_DIR = path.posix.join(process.cwd(), 'data');
+
     const inputFile = './test/__fixtures__/test_candidate_market_groups.json';
-    const outputFile = 'market_pairs.json';
+    const outputFile = path.posix.join(DATA_DIR, 'market_pairs.json');
 
     if (!fs.existsSync(inputFile)) {
         console.error(`Error: ${inputFile} not found. Run your vector matcher script first.`);
