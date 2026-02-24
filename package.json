@@ -8,13 +8,12 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "setup": "chmod +x setup/llm_setup.sh && ./setup/llm_setup.sh"
-  },
-  "dependencies": {
-    "@huggingface/transformers": "^3.8.1",
+    "setup": "chmod +x setup/llm_setup.sh && ./setup/llm_setup.sh",
+    "test-discovery": "chmod +x ./src/test/test_discovery.sh && ./src/test/test_discovery.sh",
     "cli-progress": "^3.12.0",
     "csv-parser": "^3.2.0",
-    "fs": "^0.0.1-security"
+    "fs": "^0.0.1-security",
+    "pmxtjs": "^2.14.1"
   },
   "devDependencies": {
     "@types/cli-progress": "^3.11.6",
