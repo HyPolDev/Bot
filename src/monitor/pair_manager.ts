@@ -4,7 +4,8 @@ import pmxt from 'pmxtjs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import WebSocket from 'ws'; // <-- NEW: Native WebSockets
+import WebSocket from 'ws';
+import crypto from 'crypto';
 
 dotenv.config({ override: true });
 
@@ -48,6 +49,11 @@ class PairManager {
         no: { bids: new Map<number, number>(), asks: new Map<number, number>() }
     };
 
+    private kalshiBooks = {
+        yes: new Map<number, number>(),
+        no: new Map<number, number>()
+    };
+
     private isRunning: boolean = false;
     private pollIntervalMs: number = 2000;
 
@@ -86,7 +92,7 @@ class PairManager {
 
             // Start the streams
             this.streamPoly(); // <-- Upgraded to WebSockets
-            this.pollKalshi(); // <-- Still on REST (for now)
+            this.streamKalshi(); // <-- Still on REST (for now)
 
         } catch (error) {
             console.error(`[Error] Initialization failed:`, error);
@@ -202,48 +208,149 @@ class PairManager {
         this.printState('Poly[WS]');
     }
 
-    // --- Kalshi REST Polling Loop ---
-    private async pollKalshi() {
+    // --- Kalshi WEBSOCKET Stream (Lightning Fast) ---
+    // --- Kalshi WEBSOCKET Stream (Lightning Fast) ---
+    private streamKalshi() {
         if (!this.kalshiOutcomeId || !this.isRunning) return;
 
+        // 1. Generate the Kalshi V2 Authentication Cryptography
+        const timestamp = Date.now().toString();
+        const method = "GET";
+        const wsPath = "/trade-api/ws/v2"; // <-- FIXED 404 URL PATH
+        const msgString = timestamp + method + wsPath;
+
+        let signature = "";
         try {
-            const response = await fetch(`https://api.elections.kalshi.com/trade-api/v2/markets/${this.kalshiOutcomeId}/orderbook`);
-            if (!response.ok) throw new Error(`Kalshi API HTTP ${response.status}`);
+            const privateKey = fs.readFileSync(process.env.KALSHI_KEY_PATH || '', 'utf-8');
+            const sign = crypto.createSign('SHA256');
+            sign.update(msgString);
+            sign.end();
 
-            const data = await response.json();
+            // Kalshi requires strict RSA-PSS padding
+            signature = sign.sign({
+                key: privateKey,
+                padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+                saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST
+            }, 'base64');
+        } catch (e) {
+            console.error("\n[System] Failed to generate Kalshi RSA Signature. Check your private key path.");
+            return;
+        }
 
-            const rawYesBids = (data.orderbook?.yes || []).map((b: any) => ({ price: b[0] / 100, size: b[1] }));
-            const rawNoBids = (data.orderbook?.no || []).map((b: any) => ({ price: b[0] / 100, size: b[1] }));
+        // 2. Connect with Full Auth Headers
+        const ws = new WebSocket(`wss://api.elections.kalshi.com${wsPath}`, {
+            headers: {
+                'KALSHI-ACCESS-KEY': process.env.KALSHI_API_KEY || '',
+                'KALSHI-ACCESS-SIGNATURE': signature,
+                'KALSHI-ACCESS-TIMESTAMP': timestamp
+            }
+        });
 
-            const deriveAsks = (oppositeBids: any[]) => oppositeBids.map(b => ({
-                price: Number((1.00 - b.price).toFixed(2)),
-                size: b.size
-            })).sort((a, b) => a.price - b.price);
-
-            this.latestKalshiBook = {
-                yes: {
-                    bids: rawYesBids.sort((a: any, b: any) => b.price - a.price),
-                    asks: deriveAsks(rawNoBids)
-                },
-                no: {
-                    bids: rawNoBids.sort((a: any, b: any) => b.price - a.price),
-                    asks: deriveAsks(rawYesBids)
+        ws.on('open', () => {
+            const subscribeMsg = {
+                id: 1,
+                cmd: "subscribe",
+                params: {
+                    channels: ["orderbook_delta"],
+                    market_tickers: [this.kalshiOutcomeId]
                 }
             };
+            ws.send(JSON.stringify(subscribeMsg));
+        });
 
-            this.printState('Kalshi');
-        } catch (error: any) {
-            console.error(`\n[Kalshi Fetch Error]`, error.message || error);
-        } finally {
-            if (this.isRunning) setTimeout(() => this.pollKalshi(), this.pollIntervalMs);
-        }
+        ws.on('message', (data: WebSocket.RawData) => {
+            try {
+                const payload = JSON.parse(data.toString());
+
+                // LOUD ERROR: Catch Kalshi explicitly rejecting our subscription
+                if (payload.type === 'error') {
+                    console.error(`\n[Kalshi WS Error] Code: ${payload.msg?.code} | Msg: ${payload.msg?.msg}`);
+                    return;
+                }
+
+                if (payload.type === 'orderbook_snapshot') {
+                    this.kalshiBooks.yes.clear();
+                    this.kalshiBooks.no.clear();
+
+                    (payload.msg.yes || []).forEach((b: any) => this.kalshiBooks.yes.set(b[0] / 100, b[1]));
+                    (payload.msg.no || []).forEach((b: any) => this.kalshiBooks.no.set(b[0] / 100, b[1]));
+
+                    this.updateKalshiDashboard();
+                }
+                else if (payload.type === 'orderbook_delta') {
+                    const price = payload.msg.price / 100;
+                    const delta = payload.msg.delta;
+                    const sideStr = (payload.msg.side || "").toLowerCase();
+
+                    const targetMap = sideStr === 'yes' ? this.kalshiBooks.yes :
+                        sideStr === 'no' ? this.kalshiBooks.no : null;
+
+                    if (targetMap) {
+                        const currentSize = targetMap.get(price) || 0;
+                        const newSize = currentSize + delta;
+
+                        if (newSize <= 0) targetMap.delete(price);
+                        else targetMap.set(price, newSize);
+
+                        this.updateKalshiDashboard();
+                    }
+                }
+            } catch (e) {
+                // Silently swallow non-JSON pings
+            }
+        });
+
+        const pingInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.ping(); // Kalshi expects a native 0x9 frame
+        }, 10000);
+
+        ws.on('close', (code, reason) => {
+            clearInterval(pingInterval);
+            if (code !== 1000) { // Log unexpected drops
+                console.error(`\n[Kalshi WS Closed] Code: ${code} Reason: ${reason.toString() || 'Unknown'}`);
+            }
+            setTimeout(() => this.streamKalshi(), 5000);
+        });
+
+        ws.on('error', (err) => {
+            console.error(`\n[Kalshi WS Network Error]`, err.message);
+        });
+    }
+
+    // Helper to format the Kalshi Maps and derive Asks for the dashboard
+    private updateKalshiDashboard() {
+        // Derive asks by subtracting the opposite side's bid from $1.00
+        const deriveAsks = (oppositeBidsMap: Map<number, number>) => {
+            return Array.from(oppositeBidsMap.entries())
+                .map(([price, size]) => ({ price: Number((1.00 - price).toFixed(2)), size }))
+                .sort((a, b) => a.price - b.price); // Ascending (Best Ask first)
+        };
+
+        const yesBids = Array.from(this.kalshiBooks.yes.entries())
+            .map(([price, size]) => ({ price, size }))
+            .sort((a, b) => b.price - a.price); // Descending (Best Bid first)
+
+        const noBids = Array.from(this.kalshiBooks.no.entries())
+            .map(([price, size]) => ({ price, size }))
+            .sort((a, b) => b.price - a.price); // Descending (Best Bid first)
+
+        this.latestKalshiBook = {
+            yes: { bids: yesBids, asks: deriveAsks(this.kalshiBooks.no) },
+            no: { bids: noBids, asks: deriveAsks(this.kalshiBooks.yes) }
+        };
+
+        this.printState('Kalshi[WS]');
     }
 
     private renderedLines: number = 0;
 
     // --- Output Formatter ---
     private printState(source: string) {
-        if (!this.latestKalshiBook) return; // Wait for Kalshi's first REST poll to finish
+        // UN-FROZEN: Draw Polymarket even if Kalshi is dead
+        if (!this.latestKalshiBook) {
+            process.stdout.write(`\r[Tick: ${source.padEnd(10)}] Poly connected. Waiting on Kalshi...      `);
+            return;
+        }
 
         if (this.renderedLines > 0) {
             process.stdout.write(`\x1B[${this.renderedLines}A\x1B[J`);
