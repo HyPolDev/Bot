@@ -5,15 +5,11 @@
   "license": "ISC",
   "author": "",
   "type": "module",
-  "main": "index.js",
+  "main": "index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npx tsx src/index.ts",
     "setup": "chmod +x setup/llm_setup.sh && ./setup/llm_setup.sh",
-    "test-discovery": "chmod +x ./src/test/test_discovery.sh && ./src/test/test_discovery.sh",
-    "cli-progress": "^3.12.0",
-    "csv-parser": "^3.2.0",
-    "fs": "^0.0.1-security",
-    "pmxtjs": "^2.14.1"
+    "test-discovery": "chmod +x ./src/test/test_discovery.sh && ./src/test/test_discovery.sh"
   },
   "devDependencies": {
     "@types/cli-progress": "^3.11.6",
@@ -21,6 +17,8 @@
     "@types/ws": "^8.18.1"
   },
   "dependencies": {
+    "cli-progress": "^3.12.0",
+    "csv-parser": "^3.2.0",
     "crypto": "^1.0.1",
     "dotenv": "^17.3.1",
     "pmxtjs": "^2.17.6",
