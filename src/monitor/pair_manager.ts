@@ -1,16 +1,17 @@
 import fs from 'fs';
 import { Polymarket, Kalshi } from 'pmxtjs';
-import pmxt from 'pmxtjs'
+import pmxt from 'pmxtjs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import WebSocket from 'ws'; // <-- NEW: Native WebSockets
 
 dotenv.config({ override: true });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 1. Interfaces matching your JSON structure
+// 1. Interfaces
 interface UnifiedMarket {
     internal_id: string;
     platform: string;
@@ -26,7 +27,6 @@ interface CandidatePair {
 }
 
 // 2. The Pair Manager Class
-// 2. The Pair Manager Class
 class PairManager {
     private poly: Polymarket;
     private kalshi: Kalshi;
@@ -34,14 +34,19 @@ class PairManager {
     private polyInternalId: string;
     private kalshiInternalId: string;
 
-    // We now track BOTH token IDs for Polymarket
     private polyOutcomeIdYes: string | null = null;
     private polyOutcomeIdNo: string | null = null;
     private kalshiOutcomeId: string | null = null;
 
-    // Our local, live-updating dual orderbooks
-    private latestPolyBook: { yes: any, no: any } | null = null;
+    // Local dashboard state (Initialized to empty arrays to prevent crashes)
+    private latestPolyBook: { yes: any, no: any } = { yes: { bids: [], asks: [] }, no: { bids: [], asks: [] } };
     private latestKalshiBook: { yes: any, no: any } | null = null;
+
+    // NEW: Delta Maps for lightning-fast WebSocket orderbook merging
+    private polyBooks = {
+        yes: { bids: new Map<number, number>(), asks: new Map<number, number>() },
+        no: { bids: new Map<number, number>(), asks: new Map<number, number>() }
+    };
 
     private isRunning: boolean = false;
     private pollIntervalMs: number = 2000;
@@ -50,7 +55,9 @@ class PairManager {
         this.polyInternalId = polyId;
         this.kalshiInternalId = kalshiId;
 
-        this.poly = new Polymarket(); // Anonymous
+        // PMXT is loaded and authenticated here. It is standing by to execute 
+        // trade orders later, even though we are bypassing it for data fetching right now.
+        this.poly = new Polymarket();
 
         const kalshiOptions: any = {};
         if (process.env.KALSHI_API_KEY) kalshiOptions.apiKey = process.env.KALSHI_API_KEY;
@@ -70,54 +77,129 @@ class PairManager {
             const polyMarketData = await polyResponse.json();
             const clobTokenIds = JSON.parse(polyMarketData.clobTokenIds);
 
-            // Save both the YES (index 0) and NO (index 1) token IDs
             this.polyOutcomeIdYes = clobTokenIds[0];
             this.polyOutcomeIdNo = clobTokenIds[1];
             this.kalshiOutcomeId = this.kalshiInternalId;
 
-            console.log(`[System] Beginning Dual-Orderbook Polling... \n`);
+            console.log(`[System] Beginning Dual-Orderbook Streams... \n`);
             this.isRunning = true;
 
-            this.pollPoly();
-            this.pollKalshi();
+            // Start the streams
+            this.streamPoly(); // <-- Upgraded to WebSockets
+            this.pollKalshi(); // <-- Still on REST (for now)
 
         } catch (error) {
             console.error(`[Error] Initialization failed:`, error);
         }
     }
 
-    // --- Polymarket REST Polling Loop ---
-    private async pollPoly() {
+    // --- Polymarket WEBSOCKET Stream (Lightning Fast) ---
+    private streamPoly() {
         if (!this.polyOutcomeIdYes || !this.polyOutcomeIdNo || !this.isRunning) return;
 
-        try {
-            // Fetch both books concurrently to save time
-            const [yesResponse, noResponse] = await Promise.all([
-                fetch(`https://clob.polymarket.com/book?token_id=${this.polyOutcomeIdYes}`),
-                fetch(`https://clob.polymarket.com/book?token_id=${this.polyOutcomeIdNo}`)
-            ]);
+        const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market');
 
-            const yesData = await yesResponse.json();
-            const noData = await noResponse.json();
-
-            // Helper to parse Poly strings to floats and sort
-            const formatBook = (data: any) => ({
-                bids: (data.bids || []).map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) })).sort((a: any, b: any) => b.price - a.price),
-                asks: (data.asks || []).map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) })).sort((a: any, b: any) => a.price - b.price)
-            });
-
-            // Save our complete local state
-            this.latestPolyBook = {
-                yes: formatBook(yesData),
-                no: formatBook(noData)
+        ws.on('open', () => {
+            // Subscribe to both Yes and No token orderbooks
+            const subscribeMsg = {
+                assets_ids: [this.polyOutcomeIdYes, this.polyOutcomeIdNo],
+                type: "market",
             };
+            ws.send(JSON.stringify(subscribeMsg));
+        });
 
-            this.printState('Polymarket');
-        } catch (error: any) {
-            console.error(`\n[Poly Fetch Error]`, error.message || error);
-        } finally {
-            if (this.isRunning) setTimeout(() => this.pollPoly(), this.pollIntervalMs);
+        ws.on('message', (data: WebSocket.RawData) => {
+            const rawMsg = data.toString();
+
+            // Intercept heartbeat responses before JSON parsing
+            if (rawMsg === "PONG") return;
+
+            try {
+                const msg = JSON.parse(rawMsg);
+
+                // 1. Initial Snapshot: Overwrite the whole book
+                if (msg.event_type === 'book') {
+                    const isYes = msg.asset_id === this.polyOutcomeIdYes;
+                    const targetMap = isYes ? this.polyBooks.yes : this.polyBooks.no;
+
+                    targetMap.bids.clear();
+                    targetMap.asks.clear();
+
+                    msg.bids.forEach((b: any) => targetMap.bids.set(parseFloat(b.price), parseFloat(b.size)));
+                    msg.asks.forEach((a: any) => targetMap.asks.set(parseFloat(a.price), parseFloat(a.size)));
+
+                    this.updatePolyDashboard(isYes);
+                }
+
+                // 2. Real-Time Deltas: Merge changes into the book
+                else if (msg.event_type === 'price_change') {
+                    let updatedYes = false;
+                    let updatedNo = false;
+
+                    msg.price_changes.forEach((change: any) => {
+                        const isYes = change.asset_id === this.polyOutcomeIdYes;
+                        const targetMap = isYes ? this.polyBooks.yes : this.polyBooks.no;
+
+                        const price = parseFloat(change.price);
+                        const size = parseFloat(change.size);
+                        const mapToUpdate = change.side === 'BUY' ? targetMap.bids : targetMap.asks;
+
+                        // If size is 0, the order was cancelled or filled. Remove it.
+                        if (size === 0) {
+                            mapToUpdate.delete(price);
+                        } else {
+                            mapToUpdate.set(price, size);
+                        }
+
+                        if (isYes) updatedYes = true;
+                        else updatedNo = true;
+                    });
+
+                    if (updatedYes) this.updatePolyDashboard(true);
+                    if (updatedNo) this.updatePolyDashboard(false);
+                }
+            } catch (e) {
+                // If Polymarket sends any other non-JSON weirdness, catch it safely
+                console.error("[System] Failed to parse Poly message:", rawMsg);
+            }
+        });
+
+        // Polymarket drops connections if it doesn't hear a heartbeat every 10 seconds
+        const pingInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.send("PING");
+        }, 10000);
+
+        ws.on('close', () => {
+            clearInterval(pingInterval);
+            // Self-Healing: Reconnect instantly if the websocket drops
+            setTimeout(() => this.streamPoly(), 500);
+        });
+
+        ws.on('error', () => {
+            // Silently swallow network blips to prevent terminal crashes
+        });
+    }
+
+    // Helper to format the Poly Maps back into arrays for the dashboard
+    private updatePolyDashboard(isYes: boolean) {
+        const targetMap = isYes ? this.polyBooks.yes : this.polyBooks.no;
+
+        const bids = Array.from(targetMap.bids.entries())
+            .map(([price, size]) => ({ price, size }))
+            .sort((a, b) => b.price - a.price); // Descending (Best Bid first)
+
+        const asks = Array.from(targetMap.asks.entries())
+            .map(([price, size]) => ({ price, size }))
+            .sort((a, b) => a.price - b.price); // Ascending (Best Ask first)
+
+        if (isYes) {
+            this.latestPolyBook.yes = { bids, asks };
+        } else {
+            this.latestPolyBook.no = { bids, asks };
         }
+
+        // Instantly update the terminal
+        this.printState('Poly[WS]');
     }
 
     // --- Kalshi REST Polling Loop ---
@@ -130,11 +212,9 @@ class PairManager {
 
             const data = await response.json();
 
-            // Kalshi gives us raw Bids for Yes and Bids for No. 
             const rawYesBids = (data.orderbook?.yes || []).map((b: any) => ({ price: b[0] / 100, size: b[1] }));
             const rawNoBids = (data.orderbook?.no || []).map((b: any) => ({ price: b[0] / 100, size: b[1] }));
 
-            // We mathematically derive the Asks to build complete, standard books
             const deriveAsks = (oppositeBids: any[]) => oppositeBids.map(b => ({
                 price: Number((1.00 - b.price).toFixed(2)),
                 size: b.size
@@ -143,11 +223,11 @@ class PairManager {
             this.latestKalshiBook = {
                 yes: {
                     bids: rawYesBids.sort((a: any, b: any) => b.price - a.price),
-                    asks: deriveAsks(rawNoBids) // Ask Yes = 1 - Bid No
+                    asks: deriveAsks(rawNoBids)
                 },
                 no: {
                     bids: rawNoBids.sort((a: any, b: any) => b.price - a.price),
-                    asks: deriveAsks(rawYesBids) // Ask No = 1 - Bid Yes
+                    asks: deriveAsks(rawYesBids)
                 }
             };
 
@@ -163,16 +243,12 @@ class PairManager {
 
     // --- Output Formatter ---
     private printState(source: string) {
-        if (!this.latestPolyBook || !this.latestKalshiBook) return;
+        if (!this.latestKalshiBook) return; // Wait for Kalshi's first REST poll to finish
 
-        // ANSI Magic: If we've already drawn the dashboard once, move the cursor UP 
-        // by the exact number of lines we printed, and clear everything below it.
-        // This creates a static dashboard effect without clearing the whole console history.
         if (this.renderedLines > 0) {
             process.stdout.write(`\x1B[${this.renderedLines}A\x1B[J`);
         }
 
-        // Helper to format price and volume cleanly (e.g., "94.0¢ [  5.2k]")
         const formatLevel = (lvl: any) => {
             if (!lvl) return "     ---    ".padEnd(17);
             const price = (lvl.price * 100).toFixed(1) + "¢";
@@ -180,20 +256,17 @@ class PairManager {
             return `${price.padStart(5)} [${size.padStart(6)}]`.padEnd(17);
         };
 
-        // Helper to construct a dual-sided orderbook block
         const renderBook = (title: string, poly: any, kalshi: any) => {
             let str = `  === ${title} ===\n`;
-            str += `  EXCHANGE     |  POLYMARKET         |  KALSHI\n`;
+            str += `  EXCHANGE     |  POLYMARKET        |  KALSHI\n`;
 
-            // Print top 3 Asks in reverse order (so the lowest/best Ask sits right above the spread line)
             for (let i = 2; i >= 0; i--) {
-                str += `  Ask ${i + 1}        |  ${formatLevel(poly.asks[i])} |  ${formatLevel(kalshi.asks[i])}\n`;
+                str += `  Ask ${i + 1}        |  ${formatLevel(poly?.asks[i])} |  ${formatLevel(kalshi?.asks[i])}\n`;
             }
-            str += `  -------------+---------------------+---------------------\n`;
+            str += `  -------------+--------------------+---------------------\n`;
 
-            // Print top 3 Bids (so the highest/best Bid sits directly under the spread line)
             for (let i = 0; i < 3; i++) {
-                str += `  Bid ${i + 1}        |  ${formatLevel(poly.bids[i])} |  ${formatLevel(kalshi.bids[i])}\n`;
+                str += `  Bid ${i + 1}        |  ${formatLevel(poly?.bids[i])} |  ${formatLevel(kalshi?.bids[i])}\n`;
             }
             return str;
         };
@@ -206,10 +279,7 @@ class PairManager {
         output += renderBook('NO OUTCOME', this.latestPolyBook.no, this.latestKalshiBook.no);
         output += `=============================================================\n`;
 
-        // Calculate exactly how many lines this string takes up so we know how far to move up next time
         this.renderedLines = output.split('\n').length - 1;
-
-        // Print the block
         process.stdout.write(output);
     }
 }
@@ -219,32 +289,25 @@ async function run() {
     const pairsFile = path.join(process.cwd(), 'src/test/__fixtures__/test_market_pairs.json');
 
     if (!fs.existsSync(pairsFile)) {
-        console.error(`[Error] ${pairsFile} not found. Please run your matching script first.`);
+        console.error(`[Error] ${pairsFile} not found.`);
         return;
     }
 
     const rawData = fs.readFileSync(pairsFile, 'utf-8');
     const pairs: CandidatePair[] = JSON.parse(rawData);
 
-    if (pairs.length === 0) {
-        console.log(`[System] No pairs found in the JSON file.`);
-        return;
-    }
+    if (pairs.length === 0) return;
 
-    // Grab the very first pair for testing
     const testPair = pairs[0];
 
-    // Create the manager using the internal IDs
     const manager = new PairManager(
         testPair.polyMarket.internal_id,
         testPair.kalshiMarket.internal_id
     );
 
-    // Launch it
     await manager.start();
 }
 
-// Graceful shutdown
 process.on('SIGINT', async () => {
     console.log('\n[System] Shutting down PMXT server...');
     await pmxt.stopServer();
