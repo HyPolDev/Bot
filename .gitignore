@@ -14,3 +14,4 @@ market_pairs.json
 /data/*
 !/data/.gitkeep
 /src/test/__fixtures__/*
+KALSHI-API-SECRET.txt

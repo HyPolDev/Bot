@@ -1,7 +1,11 @@
 import fs from 'fs';
-import pmxt from 'pmxtjs';
+import { Polymarket, Kalshi } from 'pmxtjs';
+import pmxt from 'pmxtjs'
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+dotenv.config({ override: true });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,7 +14,7 @@ const __dirname = path.dirname(__filename);
 interface UnifiedMarket {
     internal_id: string;
     platform: string;
-    original_url_slug: string; // We will use this to search Polymarket
+    original_url_slug: string;
     market_question: string;
 }
 
@@ -18,61 +22,90 @@ interface CandidatePair {
     polyMarket: UnifiedMarket;
     kalshiMarket: UnifiedMarket;
     score: number;
+    finalRankScore: number;
 }
 
 // 2. The Pair Manager Class
 class PairManager {
-    private poly: pmxt.Polymarket;
-    private kalshi: pmxt.Kalshi;
+    private poly: Polymarket;
+    private kalshi: Kalshi;
 
-    private polyMarketSlug: string;
+    private polyInternalId: string;
     private kalshiInternalId: string;
 
     // PMXT requires the specific outcomeId for deep-dive operations
     private polyOutcomeId: string | null = null;
     private kalshiOutcomeId: string | null = null;
 
-    private latestPolyBook: pmxt.OrderBook | null = null;
-    private latestKalshiBook: pmxt.OrderBook | null = null;
+    private latestPolyBook: any | null = null;
+    private latestKalshiBook: any | null = null;
 
     // Controls the polling loops
     private isRunning: boolean = false;
     private pollIntervalMs: number = 2000; // Poll every 2 seconds
 
-    constructor(polySlug: string, kalshiId: string) {
-        this.polyMarketSlug = polySlug;
+    constructor(polyId: string, kalshiId: string) {
+        this.polyInternalId = polyId;
         this.kalshiInternalId = kalshiId;
 
-        // Initialize the exchanges (this automatically starts the background PMXT server)
-        this.poly = new pmxt.Polymarket();
-        this.kalshi = new pmxt.Kalshi();
+        // --- Polymarket (Anonymous Mode) ---
+        // Orderbooks are public. Supplying a private key forces L2 proxy wallet derivation,
+        // which fails if the wallet hasn't been initialized on-chain. We stay anonymous.
+        this.poly = new Polymarket();
+
+        // --- Kalshi (Auth Required) ---
+        const kalshiOptions: any = {};
+        if (process.env.KALSHI_API_KEY) {
+            kalshiOptions.apiKey = process.env.KALSHI_API_KEY;
+            console.log(`[Debug] Kalshi API Key Loaded: ${kalshiOptions.apiKey.substring(0, 5)}...`);
+        } else {
+            console.warn("[Warning] KALSHI_API_KEY not found in .env");
+        }
+
+        if (process.env.KALSHI_KEY_PATH && fs.existsSync(process.env.KALSHI_KEY_PATH)) {
+            const rawKey = fs.readFileSync(process.env.KALSHI_KEY_PATH, 'utf-8');
+            kalshiOptions.privateKey = rawKey;
+
+            // Debug the key format (should start with -----BEGIN and have multiple lines)
+            const isRSA = rawKey.includes('BEGIN RSA PRIVATE KEY');
+            console.log(`[Debug] Kalshi RSA Key Loaded. Valid header format: ${isRSA}`);
+            console.log(`[Debug] Kalshi RSA Key Length: ${rawKey.length} characters.`);
+        } else {
+            console.warn(`[Warning] Kalshi key file not found at ${process.env.KALSHI_KEY_PATH}`);
+        }
+
+        this.kalshi = new Kalshi(kalshiOptions);
     }
 
     public async start() {
         console.log(`[System] Initializing Pair Manager...`);
-        console.log(`[System] Polymarket Slug: ${this.polyMarketSlug} | Kalshi ID: ${this.kalshiInternalId}`);
+        console.log(`[System] Polymarket ID: ${this.polyInternalId} | Kalshi ID: ${this.kalshiInternalId}`);
 
         try {
-            // Step A: Fetch the full market data to get the correct outcome IDs
-            // For Polymarket, we search by slug
-            const polyResults = await this.poly.fetchMarkets({ slug: this.polyMarketSlug });
-            if (!polyResults || polyResults.length === 0) {
-                throw new Error(`Polymarket market not found for slug: ${this.polyMarketSlug}`);
-            }
-            const polyMarket = polyResults[0];
+            // Route around PMXT and fetch Polymarket data directly via Gamma API
+            console.log(`[System] Fetching Polymarket Token IDs directly from Gamma API...`);
+            const polyResponse = await fetch(`https://gamma-api.polymarket.com/markets/${this.polyInternalId}`);
 
-            // For Kalshi, we can use the internal_id directly as the outcomeId for the orderbook
-            // (The documentation notes that the Kalshi market ticker IS the outcomeId)
+            if (!polyResponse.ok) {
+                throw new Error(`Gamma API failed with status: ${polyResponse.status}`);
+            }
+
+            const polyMarketData = await polyResponse.json();
+            const clobTokenIds = JSON.parse(polyMarketData.clobTokenIds);
+            console.log("[Debug] polymarket response data")
+            console.log(polyMarketData)
+
+            // Index 0 is standard for the "Yes" outcome
+            this.polyOutcomeId = clobTokenIds[0];
             this.kalshiOutcomeId = this.kalshiInternalId;
 
-            // Polymarket requires extracting the specific CLOB Token ID from the outcomes array
-            this.polyOutcomeId = polyMarket.outcomes[0].id;
-
-            console.log(`[System] Successfully mapped outcome IDs. Beginning Orderbook Polling... \n`);
+            console.log(`[System] Poly Outcome ID: ${this.polyOutcomeId}`);
+            console.log(`[System] Kalshi Outcome ID: ${this.kalshiOutcomeId}`);
+            console.log(`[System] Beginning Orderbook Polling... \n`);
 
             this.isRunning = true;
 
-            // Step B: Start the concurrent polling loops in the background
+            // Start the concurrent polling loops
             this.pollPoly();
             this.pollKalshi();
 
@@ -82,14 +115,40 @@ class PairManager {
     }
 
     // --- Polymarket REST Polling Loop ---
+    // --- Polymarket REST Polling Loop ---
+    // --- Polymarket REST Polling Loop (Native Fetch Override) ---
+    // --- Polymarket REST Polling Loop (Native Fetch Override) ---
     private async pollPoly() {
         if (!this.polyOutcomeId || !this.isRunning) return;
 
         try {
-            this.latestPolyBook = await this.poly.fetchOrderBook(this.polyOutcomeId);
+            const response = await fetch(`https://clob.polymarket.com/book?token_id=${this.polyOutcomeId}`);
+
+            if (!response.ok) {
+                throw new Error(`CLOB API HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            // Map and sort Polymarket JSON. Prices and sizes are strings in the raw response.
+            // Bids: Sort descending (highest price first)
+            const sortedBids = (data.bids || [])
+                .map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
+                .sort((a: any, b: any) => b.price - a.price);
+
+            // Asks: Sort ascending (lowest price first)
+            const sortedAsks = (data.asks || [])
+                .map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
+                .sort((a: any, b: any) => a.price - b.price);
+
+            this.latestPolyBook = {
+                bids: sortedBids,
+                asks: sortedAsks
+            };
+
             this.printState('Polymarket');
-        } catch (error) {
-            // Silently catch transient network errors so the loop doesn't crash
+        } catch (error: any) {
+            console.error(`\n[Poly Fetch Error]`, error.message || error);
         } finally {
             if (this.isRunning) {
                 setTimeout(() => this.pollPoly(), this.pollIntervalMs);
@@ -97,15 +156,44 @@ class PairManager {
         }
     }
 
-    // --- Kalshi REST Polling Loop ---
+    // --- Kalshi REST Polling Loop (Native Fetch Override) ---
     private async pollKalshi() {
         if (!this.kalshiOutcomeId || !this.isRunning) return;
 
         try {
-            this.latestKalshiBook = await this.kalshi.fetchOrderBook(this.kalshiOutcomeId);
+            const response = await fetch(`https://api.elections.kalshi.com/trade-api/v2/markets/${this.kalshiOutcomeId}/orderbook`);
+
+            if (!response.ok) {
+                throw new Error(`Kalshi API HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            // Kalshi returns 'yes' and 'no' arrays containing [price_in_cents, quantity]
+            // Bids for 'Yes' are in the 'yes' array. We sort descending to get the highest bid.
+            const yesBids = (data.orderbook?.yes || [])
+                .map((b: any) => ({ price: b[0] / 100, size: b[1] }))
+                .sort((a: any, b: any) => b.price - a.price);
+
+            // The Ask for 'Yes' is implied by the highest Bid for 'No' (1.00 - No_Bid = Yes_Ask)
+            // We find the highest 'No' bid, then calculate the implied 'Yes' ask, and sort ascending.
+            const yesAsks = (data.orderbook?.no || [])
+                .map((b: any) => {
+                    const noBidPrice = b[0] / 100;
+                    const impliedYesAsk = 1.00 - noBidPrice;
+                    // Format to 2 decimal places to avoid floating point weirdness like 0.06000000000000005
+                    return { price: Number(impliedYesAsk.toFixed(2)), size: b[1] };
+                })
+                .sort((a: any, b: any) => a.price - b.price);
+
+            this.latestKalshiBook = {
+                bids: yesBids,
+                asks: yesAsks
+            };
+
             this.printState('Kalshi');
-        } catch (error) {
-            // Silently catch transient network errors
+        } catch (error: any) {
+            console.error(`\n[Kalshi Fetch Error]`, error.message || error);
         } finally {
             if (this.isRunning) {
                 setTimeout(() => this.pollKalshi(), this.pollIntervalMs);
@@ -115,16 +203,17 @@ class PairManager {
 
     // --- Output Formatter ---
     private printState(source: string) {
-        // Ensure we have data for both before printing to avoid confusing logs
-        if (!this.latestPolyBook || !this.latestKalshiBook) return;
+        if (!this.latestPolyBook || !this.latestKalshiBook) {
+            const missing = !this.latestPolyBook ? 'Polymarket' : 'Kalshi';
+            process.stdout.write(`\r[Tick: ${source.padEnd(10)}] Still waiting on ${missing} to return data...      `);
+            return;
+        }
 
-        // Safely extract the best bid and ask, defaulting to 0 if the book is empty
         const pBid = this.latestPolyBook.bids[0]?.price || 0;
         const pAsk = this.latestPolyBook.asks[0]?.price || 0;
         const kBid = this.latestKalshiBook.bids[0]?.price || 0;
         const kAsk = this.latestKalshiBook.asks[0]?.price || 0;
 
-        // Using process.stdout.write with a carriage return (\r) to update the console in place 
         process.stdout.write(
             `\r[Tick: ${source.padEnd(10)}] ` +
             `POLY | Bid: ${(pBid * 100).toFixed(1)}¢ Ask: ${(pAsk * 100).toFixed(1)}¢ || ` +
@@ -135,10 +224,6 @@ class PairManager {
 
 // 3. Main Execution Bootstrapper
 async function run() {
-
-    //const DATA_DIR = path.posix.join(process.cwd(), 'data');
-    //const pairsFile = path.posix.join(DATA_DIR, 'market_pairs.json');
-
     const pairsFile = path.join(process.cwd(), 'src/test/__fixtures__/test_market_pairs.json');
 
     if (!fs.existsSync(pairsFile)) {
@@ -157,9 +242,9 @@ async function run() {
     // Grab the very first pair for testing
     const testPair = pairs[0];
 
-    // Create the manager using the URL slug for Poly and the internal ID (ticker) for Kalshi
+    // Create the manager using the internal IDs
     const manager = new PairManager(
-        testPair.polyMarket.original_url_slug,
+        testPair.polyMarket.internal_id,
         testPair.kalshiMarket.internal_id
     );
 
