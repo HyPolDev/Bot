@@ -26,6 +26,7 @@ interface CandidatePair {
 }
 
 // 2. The Pair Manager Class
+// 2. The Pair Manager Class
 class PairManager {
     private poly: Polymarket;
     private kalshi: Kalshi;
@@ -33,192 +34,183 @@ class PairManager {
     private polyInternalId: string;
     private kalshiInternalId: string;
 
-    // PMXT requires the specific outcomeId for deep-dive operations
-    private polyOutcomeId: string | null = null;
+    // We now track BOTH token IDs for Polymarket
+    private polyOutcomeIdYes: string | null = null;
+    private polyOutcomeIdNo: string | null = null;
     private kalshiOutcomeId: string | null = null;
 
-    private latestPolyBook: any | null = null;
-    private latestKalshiBook: any | null = null;
+    // Our local, live-updating dual orderbooks
+    private latestPolyBook: { yes: any, no: any } | null = null;
+    private latestKalshiBook: { yes: any, no: any } | null = null;
 
-    // Controls the polling loops
     private isRunning: boolean = false;
-    private pollIntervalMs: number = 2000; // Poll every 2 seconds
+    private pollIntervalMs: number = 2000;
 
     constructor(polyId: string, kalshiId: string) {
         this.polyInternalId = polyId;
         this.kalshiInternalId = kalshiId;
 
-        // --- Polymarket (Anonymous Mode) ---
-        // Orderbooks are public. Supplying a private key forces L2 proxy wallet derivation,
-        // which fails if the wallet hasn't been initialized on-chain. We stay anonymous.
-        this.poly = new Polymarket();
+        this.poly = new Polymarket(); // Anonymous
 
-        // --- Kalshi (Auth Required) ---
         const kalshiOptions: any = {};
-        if (process.env.KALSHI_API_KEY) {
-            kalshiOptions.apiKey = process.env.KALSHI_API_KEY;
-            console.log(`[Debug] Kalshi API Key Loaded: ${kalshiOptions.apiKey.substring(0, 5)}...`);
-        } else {
-            console.warn("[Warning] KALSHI_API_KEY not found in .env");
-        }
-
+        if (process.env.KALSHI_API_KEY) kalshiOptions.apiKey = process.env.KALSHI_API_KEY;
         if (process.env.KALSHI_KEY_PATH && fs.existsSync(process.env.KALSHI_KEY_PATH)) {
-            const rawKey = fs.readFileSync(process.env.KALSHI_KEY_PATH, 'utf-8');
-            kalshiOptions.privateKey = rawKey;
-
-            // Debug the key format (should start with -----BEGIN and have multiple lines)
-            const isRSA = rawKey.includes('BEGIN RSA PRIVATE KEY');
-            console.log(`[Debug] Kalshi RSA Key Loaded. Valid header format: ${isRSA}`);
-            console.log(`[Debug] Kalshi RSA Key Length: ${rawKey.length} characters.`);
-        } else {
-            console.warn(`[Warning] Kalshi key file not found at ${process.env.KALSHI_KEY_PATH}`);
+            kalshiOptions.privateKey = fs.readFileSync(process.env.KALSHI_KEY_PATH, 'utf-8');
         }
-
         this.kalshi = new Kalshi(kalshiOptions);
     }
 
     public async start() {
         console.log(`[System] Initializing Pair Manager...`);
-        console.log(`[System] Polymarket ID: ${this.polyInternalId} | Kalshi ID: ${this.kalshiInternalId}`);
-
         try {
-            // Route around PMXT and fetch Polymarket data directly via Gamma API
-            console.log(`[System] Fetching Polymarket Token IDs directly from Gamma API...`);
+            console.log(`[System] Fetching Polymarket Token IDs...`);
             const polyResponse = await fetch(`https://gamma-api.polymarket.com/markets/${this.polyInternalId}`);
-
-            if (!polyResponse.ok) {
-                throw new Error(`Gamma API failed with status: ${polyResponse.status}`);
-            }
+            if (!polyResponse.ok) throw new Error(`Gamma API HTTP ${polyResponse.status}`);
 
             const polyMarketData = await polyResponse.json();
             const clobTokenIds = JSON.parse(polyMarketData.clobTokenIds);
-            console.log("[Debug] polymarket response data")
-            console.log(polyMarketData)
 
-            // Index 0 is standard for the "Yes" outcome
-            this.polyOutcomeId = clobTokenIds[0];
+            // Save both the YES (index 0) and NO (index 1) token IDs
+            this.polyOutcomeIdYes = clobTokenIds[0];
+            this.polyOutcomeIdNo = clobTokenIds[1];
             this.kalshiOutcomeId = this.kalshiInternalId;
 
-            console.log(`[System] Poly Outcome ID: ${this.polyOutcomeId}`);
-            console.log(`[System] Kalshi Outcome ID: ${this.kalshiOutcomeId}`);
-            console.log(`[System] Beginning Orderbook Polling... \n`);
-
+            console.log(`[System] Beginning Dual-Orderbook Polling... \n`);
             this.isRunning = true;
 
-            // Start the concurrent polling loops
             this.pollPoly();
             this.pollKalshi();
 
         } catch (error) {
-            console.error(`[Error] Failed to initialize market data:`, error);
+            console.error(`[Error] Initialization failed:`, error);
         }
     }
 
     // --- Polymarket REST Polling Loop ---
-    // --- Polymarket REST Polling Loop ---
-    // --- Polymarket REST Polling Loop (Native Fetch Override) ---
-    // --- Polymarket REST Polling Loop (Native Fetch Override) ---
     private async pollPoly() {
-        if (!this.polyOutcomeId || !this.isRunning) return;
+        if (!this.polyOutcomeIdYes || !this.polyOutcomeIdNo || !this.isRunning) return;
 
         try {
-            const response = await fetch(`https://clob.polymarket.com/book?token_id=${this.polyOutcomeId}`);
+            // Fetch both books concurrently to save time
+            const [yesResponse, noResponse] = await Promise.all([
+                fetch(`https://clob.polymarket.com/book?token_id=${this.polyOutcomeIdYes}`),
+                fetch(`https://clob.polymarket.com/book?token_id=${this.polyOutcomeIdNo}`)
+            ]);
 
-            if (!response.ok) {
-                throw new Error(`CLOB API HTTP ${response.status}`);
-            }
+            const yesData = await yesResponse.json();
+            const noData = await noResponse.json();
 
-            const data = await response.json();
+            // Helper to parse Poly strings to floats and sort
+            const formatBook = (data: any) => ({
+                bids: (data.bids || []).map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) })).sort((a: any, b: any) => b.price - a.price),
+                asks: (data.asks || []).map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) })).sort((a: any, b: any) => a.price - b.price)
+            });
 
-            // Map and sort Polymarket JSON. Prices and sizes are strings in the raw response.
-            // Bids: Sort descending (highest price first)
-            const sortedBids = (data.bids || [])
-                .map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
-                .sort((a: any, b: any) => b.price - a.price);
-
-            // Asks: Sort ascending (lowest price first)
-            const sortedAsks = (data.asks || [])
-                .map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
-                .sort((a: any, b: any) => a.price - b.price);
-
+            // Save our complete local state
             this.latestPolyBook = {
-                bids: sortedBids,
-                asks: sortedAsks
+                yes: formatBook(yesData),
+                no: formatBook(noData)
             };
 
             this.printState('Polymarket');
         } catch (error: any) {
             console.error(`\n[Poly Fetch Error]`, error.message || error);
         } finally {
-            if (this.isRunning) {
-                setTimeout(() => this.pollPoly(), this.pollIntervalMs);
-            }
+            if (this.isRunning) setTimeout(() => this.pollPoly(), this.pollIntervalMs);
         }
     }
 
-    // --- Kalshi REST Polling Loop (Native Fetch Override) ---
+    // --- Kalshi REST Polling Loop ---
     private async pollKalshi() {
         if (!this.kalshiOutcomeId || !this.isRunning) return;
 
         try {
             const response = await fetch(`https://api.elections.kalshi.com/trade-api/v2/markets/${this.kalshiOutcomeId}/orderbook`);
-
-            if (!response.ok) {
-                throw new Error(`Kalshi API HTTP ${response.status}`);
-            }
+            if (!response.ok) throw new Error(`Kalshi API HTTP ${response.status}`);
 
             const data = await response.json();
 
-            // Kalshi returns 'yes' and 'no' arrays containing [price_in_cents, quantity]
-            // Bids for 'Yes' are in the 'yes' array. We sort descending to get the highest bid.
-            const yesBids = (data.orderbook?.yes || [])
-                .map((b: any) => ({ price: b[0] / 100, size: b[1] }))
-                .sort((a: any, b: any) => b.price - a.price);
+            // Kalshi gives us raw Bids for Yes and Bids for No. 
+            const rawYesBids = (data.orderbook?.yes || []).map((b: any) => ({ price: b[0] / 100, size: b[1] }));
+            const rawNoBids = (data.orderbook?.no || []).map((b: any) => ({ price: b[0] / 100, size: b[1] }));
 
-            // The Ask for 'Yes' is implied by the highest Bid for 'No' (1.00 - No_Bid = Yes_Ask)
-            // We find the highest 'No' bid, then calculate the implied 'Yes' ask, and sort ascending.
-            const yesAsks = (data.orderbook?.no || [])
-                .map((b: any) => {
-                    const noBidPrice = b[0] / 100;
-                    const impliedYesAsk = 1.00 - noBidPrice;
-                    // Format to 2 decimal places to avoid floating point weirdness like 0.06000000000000005
-                    return { price: Number(impliedYesAsk.toFixed(2)), size: b[1] };
-                })
-                .sort((a: any, b: any) => a.price - b.price);
+            // We mathematically derive the Asks to build complete, standard books
+            const deriveAsks = (oppositeBids: any[]) => oppositeBids.map(b => ({
+                price: Number((1.00 - b.price).toFixed(2)),
+                size: b.size
+            })).sort((a, b) => a.price - b.price);
 
             this.latestKalshiBook = {
-                bids: yesBids,
-                asks: yesAsks
+                yes: {
+                    bids: rawYesBids.sort((a: any, b: any) => b.price - a.price),
+                    asks: deriveAsks(rawNoBids) // Ask Yes = 1 - Bid No
+                },
+                no: {
+                    bids: rawNoBids.sort((a: any, b: any) => b.price - a.price),
+                    asks: deriveAsks(rawYesBids) // Ask No = 1 - Bid Yes
+                }
             };
 
             this.printState('Kalshi');
         } catch (error: any) {
             console.error(`\n[Kalshi Fetch Error]`, error.message || error);
         } finally {
-            if (this.isRunning) {
-                setTimeout(() => this.pollKalshi(), this.pollIntervalMs);
-            }
+            if (this.isRunning) setTimeout(() => this.pollKalshi(), this.pollIntervalMs);
         }
     }
 
+    private renderedLines: number = 0;
+
     // --- Output Formatter ---
     private printState(source: string) {
-        if (!this.latestPolyBook || !this.latestKalshiBook) {
-            const missing = !this.latestPolyBook ? 'Polymarket' : 'Kalshi';
-            process.stdout.write(`\r[Tick: ${source.padEnd(10)}] Still waiting on ${missing} to return data...      `);
-            return;
+        if (!this.latestPolyBook || !this.latestKalshiBook) return;
+
+        // ANSI Magic: If we've already drawn the dashboard once, move the cursor UP 
+        // by the exact number of lines we printed, and clear everything below it.
+        // This creates a static dashboard effect without clearing the whole console history.
+        if (this.renderedLines > 0) {
+            process.stdout.write(`\x1B[${this.renderedLines}A\x1B[J`);
         }
 
-        const pBid = this.latestPolyBook.bids[0]?.price || 0;
-        const pAsk = this.latestPolyBook.asks[0]?.price || 0;
-        const kBid = this.latestKalshiBook.bids[0]?.price || 0;
-        const kAsk = this.latestKalshiBook.asks[0]?.price || 0;
+        // Helper to format price and volume cleanly (e.g., "94.0¢ [  5.2k]")
+        const formatLevel = (lvl: any) => {
+            if (!lvl) return "     ---    ".padEnd(17);
+            const price = (lvl.price * 100).toFixed(1) + "¢";
+            const size = lvl.size >= 1000 ? (lvl.size / 1000).toFixed(1) + "k" : Math.floor(lvl.size).toString();
+            return `${price.padStart(5)} [${size.padStart(6)}]`.padEnd(17);
+        };
 
-        process.stdout.write(
-            `\r[Tick: ${source.padEnd(10)}] ` +
-            `POLY | Bid: ${(pBid * 100).toFixed(1)}¢ Ask: ${(pAsk * 100).toFixed(1)}¢ || ` +
-            `KALSHI | Bid: ${(kBid * 100).toFixed(1)}¢ Ask: ${(kAsk * 100).toFixed(1)}¢      `
-        );
+        // Helper to construct a dual-sided orderbook block
+        const renderBook = (title: string, poly: any, kalshi: any) => {
+            let str = `  === ${title} ===\n`;
+            str += `  EXCHANGE     |  POLYMARKET         |  KALSHI\n`;
+
+            // Print top 3 Asks in reverse order (so the lowest/best Ask sits right above the spread line)
+            for (let i = 2; i >= 0; i--) {
+                str += `  Ask ${i + 1}        |  ${formatLevel(poly.asks[i])} |  ${formatLevel(kalshi.asks[i])}\n`;
+            }
+            str += `  -------------+---------------------+---------------------\n`;
+
+            // Print top 3 Bids (so the highest/best Bid sits directly under the spread line)
+            for (let i = 0; i < 3; i++) {
+                str += `  Bid ${i + 1}        |  ${formatLevel(poly.bids[i])} |  ${formatLevel(kalshi.bids[i])}\n`;
+            }
+            return str;
+        };
+
+        let output = `\n=============================================================\n`;
+        output += ` TICK: ${source.padEnd(10)} | ARBITRAGER LIVE DASHBOARD\n`;
+        output += `=============================================================\n`;
+        output += renderBook('YES OUTCOME', this.latestPolyBook.yes, this.latestKalshiBook.yes);
+        output += `\n`;
+        output += renderBook('NO OUTCOME', this.latestPolyBook.no, this.latestKalshiBook.no);
+        output += `=============================================================\n`;
+
+        // Calculate exactly how many lines this string takes up so we know how far to move up next time
+        this.renderedLines = output.split('\n').length - 1;
+
+        // Print the block
+        process.stdout.write(output);
     }
 }
 
