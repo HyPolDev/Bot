@@ -11,6 +11,7 @@ candidate_market_groups.json
 test_candidate_market_groups.json
 market_pairs.json
 KALSHI-API-SECRET.txt
+arbitrage_opportunities.txt
 
 # Preserve /data folder
 /data/*

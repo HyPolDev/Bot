@@ -1,5 +1,5 @@
-import { PolymarketWS } from '../utils/exchanges/polymarket_ws.ts';
-import { KalshiWS } from '../utils/exchanges/kalshi_ws.ts';
+import { PolymarketWS } from '../utils/exchanges/polymarket_ws.js';
+import { KalshiWS } from '../utils/exchanges/kalshi_ws.js';
 import fs from 'fs';
 
 export interface UnifiedMarket {
@@ -29,6 +29,10 @@ export class PairManager {
     // A callback the CLI can attach to trigger a screen re-render
     private onUIUpdate: (() => void) | null = null;
 
+    // --- ARBITRAGE THROTTLING CONTROLS ---
+    private lastArbitrageTime: number = 0;
+    private readonly ARBITRAGE_COOLDOWN_MS: number = 10000; // 10 seconds
+
     constructor(pair: CandidatePair) {
         this.pairData = pair;
     }
@@ -45,19 +49,17 @@ export class PairManager {
                 if (updatedSide.isYes) this.latestPolyBook.yes = { bids: updatedSide.bids, asks: updatedSide.asks };
                 else this.latestPolyBook.no = { bids: updatedSide.bids, asks: updatedSide.asks };
 
-                // Trigger Arbitrage Evaluation here eventually
                 this.evaluateArbitrage();
 
-                if (this.onUIUpdate) this.onUIUpdate(); // Tell the CLI to re-render
+                if (this.onUIUpdate) this.onUIUpdate();
             });
 
             this.kalshiWsClient = new KalshiWS(this.pairData.kalshiMarket.internal_id, (source, fullBook) => {
                 this.latestKalshiBook = fullBook;
 
-                // Trigger Arbitrage Evaluation here eventually
                 this.evaluateArbitrage();
 
-                if (this.onUIUpdate) this.onUIUpdate(); // Tell the CLI to re-render
+                if (this.onUIUpdate) this.onUIUpdate();
             });
 
             this.polyWsClient.start();
@@ -68,18 +70,22 @@ export class PairManager {
         }
     }
 
-    // CLI uses this to hook into the data stream
     public attachViewer(callback: () => void) {
         this.onUIUpdate = callback;
     }
 
-    // CLI uses this to unhook when switching back to the menu
     public detachViewer() {
         this.onUIUpdate = null;
     }
 
     private evaluateArbitrage() {
         if (!this.latestKalshiBook) return;
+
+        const now = Date.now();
+        // 1. Guard Clause: If we are still in cooldown, exit immediately to save CPU
+        if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) {
+            return;
+        }
 
         const polyYesAsks = this.latestPolyBook.yes?.asks || [];
         const polyNoAsks = this.latestPolyBook.no?.asks || [];
@@ -95,11 +101,9 @@ export class PairManager {
         if (polyYesFirst && kalshiNoFirst) {
             const combinedPrice = polyYesFirst.price + kalshiNoFirst.price;
             if (combinedPrice < 0.97) {
-                this.logArbitrageOpportunity(
-                    'PolyYes_KalshiNo',
-                    polyYesFirst,
-                    kalshiNoFirst
-                );
+                this.logArbitrageOpportunity('PolyYes_KalshiNo', polyYesFirst, kalshiNoFirst);
+                this.lastArbitrageTime = now; // 2. Lock the cooldown
+                return; // Exit so we don't accidentally double-fire the inverse trade
             }
         }
 
@@ -107,11 +111,8 @@ export class PairManager {
         if (polyNoFirst && kalshiYesFirst) {
             const combinedPrice = polyNoFirst.price + kalshiYesFirst.price;
             if (combinedPrice < 0.97) {
-                this.logArbitrageOpportunity(
-                    'PolyNo_KalshiYes',
-                    polyNoFirst,
-                    kalshiYesFirst
-                );
+                this.logArbitrageOpportunity('PolyNo_KalshiYes', polyNoFirst, kalshiYesFirst);
+                this.lastArbitrageTime = now; // 2. Lock the cooldown
             }
         }
     }
