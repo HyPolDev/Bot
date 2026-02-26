@@ -6,12 +6,16 @@ coverage
 .idea
 .vscode
 *.csv
-.csv
 unified_markets.json
 candidate_market_groups.json
 test_candidate_market_groups.json
 market_pairs.json
+KALSHI-API-SECRET.txt
+
+# Preserve /data folder
 /data/*
 !/data/.gitkeep
+
+# Preserve /test/__fixtures__ folder
 /src/test/__fixtures__/*
-KALSHI-API-SECRET.txt
+!/src/test/__fixtures__/.gitkeep

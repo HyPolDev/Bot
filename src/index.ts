@@ -14,7 +14,8 @@ const __dirname = path.dirname(__filename);
 async function bootSystem() {
     console.log("[System] Booting Arbitrage Engine...");
 
-    const pairsFile = path.join(process.cwd(), 'src/test/__fixtures__/test_market_pairs.json');
+    // const pairsFile = path.join(process.cwd(), 'src/test/__fixtures__/test_market_pairs.json');
+    const pairsFile = path.join(process.cwd(), 'data/market_pairs.json');
     if (!fs.existsSync(pairsFile)) {
         console.error(`[Error] ${pairsFile} not found.`);
         return;
