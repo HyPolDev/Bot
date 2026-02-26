@@ -19,6 +19,43 @@ interface UnifiedMarket {
 
 const unifiedMarkets: UnifiedMarket[] = [];
 
+// --- DYNAMIC BANNED WORDS FILTER ---
+let BANNED_WORDS: string[] = [];
+const blacklistPath = path.join(process.cwd(), 'data', 'blacklist.json');
+
+try {
+    if (fs.existsSync(blacklistPath)) {
+        const rawData = fs.readFileSync(blacklistPath, 'utf-8');
+        BANNED_WORDS = JSON.parse(rawData);
+        console.log(`[System] Loaded ${BANNED_WORDS.length} banned words from blacklist.json`);
+    } else {
+        // Failsafe: Create a default file if it doesn't exist
+        const defaultBlacklist = ["test", "dummy", "murder", "assassination", "o/u"];
+        fs.mkdirSync(path.dirname(blacklistPath), { recursive: true });
+        fs.writeFileSync(blacklistPath, JSON.stringify(defaultBlacklist, null, 2));
+        BANNED_WORDS = defaultBlacklist;
+        console.log(`[System] Created default blacklist.json at ${blacklistPath}`);
+    }
+} catch (error) {
+    console.error(`[Error] Failed to read or parse blacklist.json. Defaulting to empty filter.`, error);
+}
+
+// Helper to sanitize strings so symbols don't break the Regex engine
+const escapeRegExp = (string: string) => {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+// Helper to check for isolated whole words and symbols
+const containsBannedWords = (text: string): boolean => {
+    if (!text || BANNED_WORDS.length === 0) return false;
+
+    return BANNED_WORDS.some(word => {
+        const safeWord = escapeRegExp(word);
+        const regex = new RegExp(`(?<!\\w)${safeWord}(?!\\w)`, 'i');
+        return regex.test(text);
+    });
+};
+
 // Helper to extract a readable date
 const formatDate = (isoString: string) => {
     if (!isoString) return '';
@@ -49,8 +86,11 @@ function parseCSV(filePath: string, mapper: (row: any) => UnifiedMarket | null):
 
 const mapKalshi = (row: any): UnifiedMarket | null => {
     const question = row.title || "";
-    // Kalshi rules are split; combine them
     const rules = `${row.rules_primary || ""} ${row.rules_secondary || ""}`.trim();
+
+    // FILTER: Drop market if it contains banned words
+    if (containsBannedWords(question) || containsBannedWords(rules)) return null;
+
     const date = formatDate(row.expiration_time);
 
     if (!row.ticker || !question) return null;
@@ -71,6 +111,10 @@ const mapKalshi = (row: any): UnifiedMarket | null => {
 const mapPolymarket = (row: any): UnifiedMarket | null => {
     const question = row.question || "";
     const rules = row.description || "";
+
+    // FILTER: Drop market if it contains banned words
+    if (containsBannedWords(question) || containsBannedWords(rules)) return null;
+
     const date = formatDate(row.endDateIso || row.endDate);
 
     if (!row.id || !question) return null;
@@ -113,7 +157,7 @@ async function runETL() {
         await parseCSV(kalshiCsvPath, mapKalshi);
         await parseCSV(polyCsvPath, mapPolymarket);
 
-        console.log(`Successfully mapped ${unifiedMarkets.length} total markets.`);
+        console.log(`Successfully mapped ${unifiedMarkets.length} total valid markets.`);
 
         // 5. Save the output
         fs.writeFileSync(unifiedJsonPath, JSON.stringify(unifiedMarkets, null, 2));

@@ -15,6 +15,7 @@ KALSHI-API-SECRET.txt
 # Preserve /data folder
 /data/*
 !/data/.gitkeep
+!/data/blacklist.json
 
 # Preserve /test/__fixtures__ folder
 /src/test/__fixtures__/*
