@@ -1,5 +1,6 @@
 import { PolymarketWS } from '../utils/exchanges/polymarket_ws.ts';
 import { KalshiWS } from '../utils/exchanges/kalshi_ws.ts';
+import fs from 'fs';
 
 export interface UnifiedMarket {
     internal_id: string;
@@ -45,7 +46,7 @@ export class PairManager {
                 else this.latestPolyBook.no = { bids: updatedSide.bids, asks: updatedSide.asks };
 
                 // Trigger Arbitrage Evaluation here eventually
-                // this.evaluateArbitrage();
+                this.evaluateArbitrage();
 
                 if (this.onUIUpdate) this.onUIUpdate(); // Tell the CLI to re-render
             });
@@ -54,7 +55,7 @@ export class PairManager {
                 this.latestKalshiBook = fullBook;
 
                 // Trigger Arbitrage Evaluation here eventually
-                // this.evaluateArbitrage();
+                this.evaluateArbitrage();
 
                 if (this.onUIUpdate) this.onUIUpdate(); // Tell the CLI to re-render
             });
@@ -75,5 +76,58 @@ export class PairManager {
     // CLI uses this to unhook when switching back to the menu
     public detachViewer() {
         this.onUIUpdate = null;
+    }
+
+    private evaluateArbitrage() {
+        if (!this.latestKalshiBook) return;
+
+        const polyYesAsks = this.latestPolyBook.yes?.asks || [];
+        const polyNoAsks = this.latestPolyBook.no?.asks || [];
+        const kalshiYesAsks = this.latestKalshiBook.yes?.asks || [];
+        const kalshiNoAsks = this.latestKalshiBook.no?.asks || [];
+
+        const polyYesFirst = polyYesAsks[0];
+        const polyNoFirst = polyNoAsks[0];
+        const kalshiYesFirst = kalshiYesAsks[0];
+        const kalshiNoFirst = kalshiNoAsks[0];
+
+        // Polymarket 1st layer of yes asks + kalshi 1st layer of no asks < 0.97
+        if (polyYesFirst && kalshiNoFirst) {
+            const combinedPrice = polyYesFirst.price + kalshiNoFirst.price;
+            if (combinedPrice < 0.97) {
+                this.logArbitrageOpportunity(
+                    'PolyYes_KalshiNo',
+                    polyYesFirst,
+                    kalshiNoFirst
+                );
+            }
+        }
+
+        // Polymarket 1st layer of no asks + kalshi 1st layer of yes asks < 0.97
+        if (polyNoFirst && kalshiYesFirst) {
+            const combinedPrice = polyNoFirst.price + kalshiYesFirst.price;
+            if (combinedPrice < 0.97) {
+                this.logArbitrageOpportunity(
+                    'PolyNo_KalshiYes',
+                    polyNoFirst,
+                    kalshiYesFirst
+                );
+            }
+        }
+    }
+
+    private logArbitrageOpportunity(type: 'PolyYes_KalshiNo' | 'PolyNo_KalshiYes', polyAsk: any, kalshiAsk: any) {
+        const time = new Date().toISOString();
+        const marketA = this.pairData.polyMarket.market_question;
+        const marketB = this.pairData.kalshiMarket.market_question;
+
+        let msg = '';
+        if (type === 'PolyYes_KalshiNo') {
+            msg = `[arbitrage oportunity detected at "${time}" between markets [${marketA}, ${marketB}], ${polyAsk.size} yes asks at ${polyAsk.price} price in polygon, ${kalshiAsk.size} no asks at ${kalshiAsk.price} price in kalshi]\n`;
+        } else {
+            msg = `[arbitrage oportunity detected at "${time}" between markets [${marketA}, ${marketB}], ${kalshiAsk.size} yes asks at ${kalshiAsk.price} price in kalshi, ${polyAsk.size} no asks at ${polyAsk.price} price in polygon]\n`;
+        }
+
+        fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
 }
