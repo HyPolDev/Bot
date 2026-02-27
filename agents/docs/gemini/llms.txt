@@ -1,0 +1,26 @@
+# Gemini API reference
+
+Gemini API documentation
+
+## Docs
+
+- [Gemini API reference](https://ai.google.dev/api.md.txt): Gemini API documentation
+- [All methods](https://ai.google.dev/api/all-methods.md.txt): Gemini API documentation
+- [Batch API](https://ai.google.dev/api/batch-api.md.txt): Gemini API documentation
+- [Caching](https://ai.google.dev/api/caching.md.txt): Gemini API documentation
+- [Using files](https://ai.google.dev/api/files.md.txt): Gemini API documentation
+- [Generating content](https://ai.google.dev/api/generate-content.md.txt): Gemini API documentation
+- [Live Music API - WebSockets API reference](https://ai.google.dev/api/live_music.md.txt): Documentation for Google's Gemini API.
+- [Corpus Permissions](https://ai.google.dev/api/semantic-retrieval/permissions.md.txt): Gemini API documentation
+- [Counting tokens](https://ai.google.dev/api/tokens.md.txt): Gemini API documentation
+- [Permissions](https://ai.google.dev/api/tuning/permissions.md.txt): Gemini API documentation
+- [Embeddings](https://ai.google.dev/api/embeddings.md.txt): Gemini API documentation
+- [Live API - WebSockets API reference](https://ai.google.dev/api/live.md.txt): Documentation for Google's Gemini API.
+- [Models](https://ai.google.dev/api/models.md.txt): Gemini API documentation
+- [PaLM (decommissioned)](https://ai.google.dev/api/palm.md.txt): Gemini API documentation
+- [Chunks](https://ai.google.dev/api/semantic-retrieval/chunks.md.txt): Gemini API documentation
+- [Corpora](https://ai.google.dev/api/semantic-retrieval/corpora.md.txt): Gemini API documentation
+- [Documents](https://ai.google.dev/api/semantic-retrieval/documents.md.txt): Gemini API documentation
+- [Question answering](https://ai.google.dev/api/semantic-retrieval/question-answering.md.txt): Gemini API documentation
+- [Tuning](https://ai.google.dev/api/tuning.md.txt): Gemini API documentation
+- [Gemini API](https://ai.google.dev/api/interactions-api.md.txt): Documentation for Google's Gemini API.

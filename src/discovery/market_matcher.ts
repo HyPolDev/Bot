@@ -114,6 +114,38 @@ class MarketEntityMatcher {
     }
 }
 
+function filterByExpirationWindow(pairs: any[], maxMonthsAhead: number) {
+    const thresholdDate = new Date();
+    thresholdDate.setMonth(thresholdDate.getMonth() + maxMonthsAhead);
+
+    let droppedCount = 0;
+
+    const filtered = pairs.filter(pair => {
+        const polyDate = new Date(pair.polyMarket.expiration);
+        const kalshiDate = new Date(pair.kalshiMarket.expiration);
+
+        // Defensive check: If either date is missing/invalid, drop the pair to be safe
+        if (isNaN(polyDate.getTime()) || isNaN(kalshiDate.getTime())) {
+            droppedCount++;
+            return false;
+        }
+
+        // Find the earliest date between the two markets
+        const earliestDate = polyDate < kalshiDate ? polyDate : kalshiDate;
+
+        // If the earliest expiration is beyond our threshold, drop it
+        if (earliestDate > thresholdDate) {
+            droppedCount++;
+            return false;
+        }
+
+        return true;
+    });
+
+    console.log(`\n[Time Filter] Dropped ${droppedCount} pairs resolving after ${thresholdDate.toISOString().split('T')[0]}.`);
+    return filtered;
+}
+
 // 3. Main Execution
 async function run() {
     const DATA_DIR = path.posix.join(process.cwd(), 'data');
@@ -134,9 +166,12 @@ async function run() {
 
     const groupedMarkets = await matcher.processAllMarkets(markets, 0.85);
 
-    console.log(`\nRanking ${groupedMarkets.length} candidates by similarity and expiration date...`);
+    // --- NEW: Apply the Time Filter ---
+    const timeFilteredMarkets = filterByExpirationWindow(groupedMarkets, 2);
 
-    const rankedMarkets = rankMarketsByScoreAndTime(groupedMarkets, 0.001, 5.00);
+    console.log(`\nRanking ${timeFilteredMarkets.length} candidates by similarity and expiration date...`);
+
+    const rankedMarkets = rankMarketsByScoreAndTime(timeFilteredMarkets, 0.80, 0.2);
 
     fs.writeFileSync(outputPath, JSON.stringify(rankedMarkets, null, 2));
 
