@@ -91,7 +91,7 @@ If the event is perfectly identical, map Outcome 0 of Market A to Market B:
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             const response = await ai.chat.completions.create({
-                model: "gpt-4o-mini",
+                model: "gpt-4o-mini", //gpt-5-nano
                 messages: [
                     { role: "system", content: "You are a precise prediction market analyst evaluating arbitrage pairs." },
                     { role: "user", content: prompt }

@@ -11,10 +11,11 @@ dotenv.config({ override: true });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function bootSystem() {
     console.log("[System] Booting Arbitrage Engine...");
 
-    // const pairsFile = path.join(process.cwd(), 'src/test/__fixtures__/test_market_pairs.json');
     const pairsFile = path.join(process.cwd(), 'data/market_pairs.json');
     if (!fs.existsSync(pairsFile)) {
         console.error(`[Error] ${pairsFile} not found.`);
@@ -29,24 +30,30 @@ async function bootSystem() {
         return;
     }
 
-    // Note: If you load 50 pairs, this will open 100 WebSockets. 
-    // In production, we will want to aggregate these connections!
     const activeManagers: PairManager[] = [];
 
-    // We will initialize the first 5 pairs just to test the loop safely
-    const pairsToLoad = pairs.slice(0, 5);
+    console.log(`[System] Initializing ${pairs.length} market pairs. Staggering network requests to avoid IP bans...`);
 
-    for (const pair of pairsToLoad) {
+    // Load ALL pairs, but stagger the WebSocket connections by 200ms
+    for (let i = 0; i < pairs.length; i++) {
+        const pair = pairs[i];
         const manager = new PairManager(pair);
+
         manager.start(); // Start background sync
         activeManagers.push(manager);
+
+        // Print progress so you know it hasn't frozen
+        process.stdout.write(`\r[System] Connected ${i + 1}/${pairs.length} Data Engines...`);
+
+        // 200ms delay to respect Cloudflare WS handshake rate limits
+        await sleep(200);
     }
 
-    // Wait a second for initial WebSocket connections to settle
-    setTimeout(() => {
-        const cli = new CLI(activeManagers);
-        cli.showMenu();
-    }, 1500);
+    console.log(`\n[System] All data engines online. Launching UI...`);
+
+    // Launch the interactive dashboard
+    const cli = new CLI(activeManagers);
+    cli.showMenu();
 }
 
 process.on('SIGINT', async () => {

@@ -7,6 +7,10 @@ export class CLI {
     private isMenuMode: boolean = true;
     private renderedLines: number = 0;
 
+    // UI Navigation State
+    private cursorIndex: number = 0;
+    private readonly PAGE_SIZE: number = 15;
+
     constructor(managers: PairManager[]) {
         this.managers = managers;
         this.setupKeyboardListeners();
@@ -15,17 +19,33 @@ export class CLI {
     public showMenu() {
         this.isMenuMode = true;
         this.activeManager = null;
+        this.renderMenu();
+    }
+
+    private renderMenu() {
+        if (!this.isMenuMode) return;
+
         console.clear();
-        console.log(`\n=== ARBITRAGER MASTER CONTROL ===`);
-        console.log(`Select a market pair to view live orderbooks:\n`);
+        console.log(`\n=== ARBITRAGER MASTER CONTROL (${this.managers.length} Pairs) ===`);
+        console.log(`Use UP/DOWN arrows to navigate. Press ENTER to monitor. Press 'q' to exit.\n`);
 
-        this.managers.forEach((manager, index) => {
-            // Truncate long questions so they fit on the screen cleanly
-            const title = manager.pairData.polyMarket.market_question.substring(0, 70) + "...";
-            console.log(`  [${index}] ${title}`);
-        });
+        // Calculate pagination window
+        const pageStart = Math.floor(this.cursorIndex / this.PAGE_SIZE) * this.PAGE_SIZE;
+        const pageEnd = Math.min(pageStart + this.PAGE_SIZE, this.managers.length);
 
-        console.log(`\nPress the number key of the pair to monitor, or Ctrl+C to exit.`);
+        for (let i = pageStart; i < pageEnd; i++) {
+            const manager = this.managers[i];
+            const title = manager.pairData.polyMarket.market_question.substring(0, 65) + "...";
+            const alignment = manager.pairData.outcomeAlignment === -1 ? "[FLIPPED]" : "[ALIGNED]";
+
+            if (i === this.cursorIndex) {
+                console.log(`  > \x1b[36m[${i}] ${alignment} ${title}\x1b[0m`); // Cyan highlight
+            } else {
+                console.log(`    [${i}] ${alignment} ${title}`);
+            }
+        }
+
+        console.log(`\nShowing ${pageStart + 1}-${pageEnd} of ${this.managers.length}`);
     }
 
     private setupKeyboardListeners() {
@@ -35,18 +55,25 @@ export class CLI {
         }
 
         process.stdin.on('keypress', (str, key) => {
-            if (key.ctrl && key.name === 'c') {
+            // Global exit commands
+            if ((key.ctrl && key.name === 'c') || key.name === 'q') {
                 process.exit();
             }
 
             if (this.isMenuMode) {
-                // If user presses a number, try to load that manager
-                const index = parseInt(key.name);
-                if (!isNaN(index) && index >= 0 && index < this.managers.length) {
-                    this.viewManager(this.managers[index]);
+                if (key.name === 'up') {
+                    if (this.cursorIndex > 0) this.cursorIndex--;
+                    this.renderMenu();
+                }
+                else if (key.name === 'down') {
+                    if (this.cursorIndex < this.managers.length - 1) this.cursorIndex++;
+                    this.renderMenu();
+                }
+                else if (key.name === 'return' || key.name === 'enter') {
+                    this.viewManager(this.managers[this.cursorIndex]);
                 }
             } else {
-                // If in dashboard mode, 'b' goes back to menu
+                // In Dashboard Mode
                 if (key.name === 'b') {
                     if (this.activeManager) this.activeManager.detachViewer();
                     this.showMenu();
@@ -61,10 +88,7 @@ export class CLI {
         this.renderedLines = 0;
         console.clear();
 
-        // Attach this CLI to the manager's update loop
         manager.attachViewer(() => this.renderDashboard());
-
-        // Force an immediate render
         this.renderDashboard();
     }
 
@@ -100,6 +124,7 @@ export class CLI {
 
         let output = `\n=============================================================\n`;
         output += ` MARKET: ${this.activeManager.pairData.polyMarket.market_question.substring(0, 50)}...\n`;
+        output += ` ALIGNMENT: ${this.activeManager.pairData.outcomeAlignment === 1 ? 'ALIGNED (+1)' : 'FLIPPED (-1)'}\n`;
         output += `=============================================================\n`;
 
         if (!kalshi) {
@@ -110,7 +135,7 @@ export class CLI {
         }
 
         output += `=============================================================\n`;
-        output += ` Press 'b' to return to menu | Press Ctrl+C to exit\n`;
+        output += ` Press 'b' to return to menu | Press 'q' to exit\n`;
 
         this.renderedLines = output.split('\n').length - 1;
         process.stdout.write(output);

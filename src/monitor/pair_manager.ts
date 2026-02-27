@@ -13,25 +13,23 @@ export interface CandidatePair {
     polyMarket: UnifiedMarket;
     kalshiMarket: UnifiedMarket;
     score: number;
-    finalRankScore: number;
+    finalRankScore?: number;
+    outcomeAlignment: 1 | -1;
 }
 
 export class PairManager {
-    public pairData: CandidatePair; // Public so the CLI can read the market question
+    public pairData: CandidatePair;
 
     private polyWsClient: PolymarketWS | null = null;
     private kalshiWsClient: KalshiWS | null = null;
 
-    // Public getters so the CLI can read the state anytime
     public latestPolyBook: { yes: any, no: any } = { yes: { bids: [], asks: [] }, no: { bids: [], asks: [] } };
     public latestKalshiBook: { yes: any, no: any } | null = null;
 
-    // A callback the CLI can attach to trigger a screen re-render
     private onUIUpdate: (() => void) | null = null;
 
-    // --- ARBITRAGE THROTTLING CONTROLS ---
     private lastArbitrageTime: number = 0;
-    private readonly ARBITRAGE_COOLDOWN_MS: number = 10000; // 10 seconds
+    private readonly ARBITRAGE_COOLDOWN_MS: number = 10000;
 
     constructor(pair: CandidatePair) {
         this.pairData = pair;
@@ -50,7 +48,6 @@ export class PairManager {
                 else this.latestPolyBook.no = { bids: updatedSide.bids, asks: updatedSide.asks };
 
                 this.evaluateArbitrage();
-
                 if (this.onUIUpdate) this.onUIUpdate();
             });
 
@@ -58,7 +55,6 @@ export class PairManager {
                 this.latestKalshiBook = fullBook;
 
                 this.evaluateArbitrage();
-
                 if (this.onUIUpdate) this.onUIUpdate();
             });
 
@@ -82,52 +78,56 @@ export class PairManager {
         if (!this.latestKalshiBook) return;
 
         const now = Date.now();
-        // 1. Guard Clause: If we are still in cooldown, exit immediately to save CPU
-        if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) {
-            return;
-        }
+        if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
 
-        const polyYesAsks = this.latestPolyBook.yes?.asks || [];
-        const polyNoAsks = this.latestPolyBook.no?.asks || [];
-        const kalshiYesAsks = this.latestKalshiBook.yes?.asks || [];
-        const kalshiNoAsks = this.latestKalshiBook.no?.asks || [];
+        const polyYesFirst = this.latestPolyBook.yes?.asks?.[0];
+        const polyNoFirst = this.latestPolyBook.no?.asks?.[0];
+        const kalshiYesFirst = this.latestKalshiBook.yes?.asks?.[0];
+        const kalshiNoFirst = this.latestKalshiBook.no?.asks?.[0];
 
-        const polyYesFirst = polyYesAsks[0];
-        const polyNoFirst = polyNoAsks[0];
-        const kalshiYesFirst = kalshiYesAsks[0];
-        const kalshiNoFirst = kalshiNoAsks[0];
+        const alignment = this.pairData.outcomeAlignment;
 
-        // Polymarket 1st layer of yes asks + kalshi 1st layer of no asks < 0.97
-        if (polyYesFirst && kalshiNoFirst) {
-            const combinedPrice = polyYesFirst.price + kalshiNoFirst.price;
-            if (combinedPrice < 0.97) {
+        // --- SCENARIO 1: Outcomes are Aligned (+1) ---
+        if (alignment === 1) {
+            // Poly Yes Ask + Kalshi No Ask
+            if (polyYesFirst && kalshiNoFirst && (polyYesFirst.price + kalshiNoFirst.price < 0.97)) {
                 this.logArbitrageOpportunity('PolyYes_KalshiNo', polyYesFirst, kalshiNoFirst);
-                this.lastArbitrageTime = now; // 2. Lock the cooldown
-                return; // Exit so we don't accidentally double-fire the inverse trade
+                this.lastArbitrageTime = now;
+                return;
+            }
+            // Poly No Ask + Kalshi Yes Ask
+            if (polyNoFirst && kalshiYesFirst && (polyNoFirst.price + kalshiYesFirst.price < 0.97)) {
+                this.logArbitrageOpportunity('PolyNo_KalshiYes', polyNoFirst, kalshiYesFirst);
+                this.lastArbitrageTime = now;
             }
         }
-
-        // Polymarket 1st layer of no asks + kalshi 1st layer of yes asks < 0.97
-        if (polyNoFirst && kalshiYesFirst) {
-            const combinedPrice = polyNoFirst.price + kalshiYesFirst.price;
-            if (combinedPrice < 0.97) {
-                this.logArbitrageOpportunity('PolyNo_KalshiYes', polyNoFirst, kalshiYesFirst);
-                this.lastArbitrageTime = now; // 2. Lock the cooldown
+        // --- SCENARIO 2: Outcomes are Flipped (-1) ---
+        else if (alignment === -1) {
+            // Because outcomes are flipped, Poly Yes = Kalshi No. 
+            // Therefore, a hedge requires buying Poly Yes AND Kalshi Yes.
+            if (polyYesFirst && kalshiYesFirst && (polyYesFirst.price + kalshiYesFirst.price < 0.97)) {
+                this.logArbitrageOpportunity('PolyYes_KalshiYes (Flipped)', polyYesFirst, kalshiYesFirst);
+                this.lastArbitrageTime = now;
+                return;
+            }
+            // The inverse hedge: Poly No AND Kalshi No
+            if (polyNoFirst && kalshiNoFirst && (polyNoFirst.price + kalshiNoFirst.price < 0.97)) {
+                this.logArbitrageOpportunity('PolyNo_KalshiNo (Flipped)', polyNoFirst, kalshiNoFirst);
+                this.lastArbitrageTime = now;
             }
         }
     }
 
-    private logArbitrageOpportunity(type: 'PolyYes_KalshiNo' | 'PolyNo_KalshiYes', polyAsk: any, kalshiAsk: any) {
+    private logArbitrageOpportunity(type: string, polyAsk: any, kalshiAsk: any) {
         const time = new Date().toISOString();
         const marketA = this.pairData.polyMarket.market_question;
         const marketB = this.pairData.kalshiMarket.market_question;
 
-        let msg = '';
-        if (type === 'PolyYes_KalshiNo') {
-            msg = `[arbitrage oportunity detected at "${time}" between markets [${marketA}, ${marketB}], ${polyAsk.size} yes asks at ${polyAsk.price} price in polygon, ${kalshiAsk.size} no asks at ${kalshiAsk.price} price in kalshi]\n`;
-        } else {
-            msg = `[arbitrage oportunity detected at "${time}" between markets [${marketA}, ${marketB}], ${kalshiAsk.size} yes asks at ${kalshiAsk.price} price in kalshi, ${polyAsk.size} no asks at ${polyAsk.price} price in polygon]\n`;
-        }
+        const msg = `[${time}] ARBITRAGE DETECTED [Spread: ${(polyAsk.price + kalshiAsk.price).toFixed(3)}]
+        Type: ${type}
+        Poly   : ${polyAsk.size} shares @ ${polyAsk.price} | ${marketA}
+        Kalshi : ${kalshiAsk.size} shares @ ${kalshiAsk.price} | ${marketB}
+        --------------------------------------------------\n`;
 
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
