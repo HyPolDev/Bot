@@ -61,7 +61,7 @@ async function bootSystem() {
     console.log(`\n[System] All data engines online. Launching UI...`);
 
     // Launch the interactive dashboard
-    const cli = new CLI(activeManagers);
+    const cli = new CLI(activeManagers, portfolio);
     cli.showMenu();
 }
 

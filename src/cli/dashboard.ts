@@ -1,35 +1,185 @@
 import readline from 'readline';
 import { PairManager } from '../monitor/pair_manager.js';
+import { PortfolioManager, Position } from '../portfolio/portfolio_manager.js';
+
+enum ViewState {
+    HOME,
+    ORDERBOOK_LIST,
+    ORDERBOOK_LIVE,
+    POSITIONS
+}
 
 export class CLI {
     private managers: PairManager[];
-    private activeManager: PairManager | null = null;
-    private isMenuMode: boolean = true;
-    private renderedLines: number = 0;
+    private portfolio: PortfolioManager;
 
-    // UI Navigation State
+    private viewState: ViewState = ViewState.HOME;
+    private activeManager: PairManager | null = null;
+
+    private renderedLines: number = 0;
     private cursorIndex: number = 0;
     private readonly PAGE_SIZE: number = 15;
 
-    constructor(managers: PairManager[]) {
+    private refreshInterval: NodeJS.Timeout | null = null;
+
+    constructor(managers: PairManager[], portfolio: PortfolioManager) {
         this.managers = managers;
+        this.portfolio = portfolio;
         this.setupKeyboardListeners();
+
+        // Start the UI render loop (updates once per second for static screens)
+        this.startRenderLoop();
     }
 
     public showMenu() {
-        this.isMenuMode = true;
+        this.viewState = ViewState.HOME;
         this.activeManager = null;
-        this.renderMenu();
+        this.renderHome();
     }
 
-    private renderMenu() {
-        if (!this.isMenuMode) return;
+    private startRenderLoop() {
+        if (this.refreshInterval) clearInterval(this.refreshInterval);
+        this.refreshInterval = setInterval(() => {
+            if (this.viewState === ViewState.HOME) this.renderHome();
+            else if (this.viewState === ViewState.POSITIONS) this.renderPositions();
+            // Orderbook live handles its own instant updates via callbacks
+        }, 1000);
+    }
 
-        console.clear();
-        console.log(`\n=== ARBITRAGER MASTER CONTROL (${this.managers.length} Pairs) ===`);
-        console.log(`Use UP/DOWN arrows to navigate. Press ENTER to monitor. Press 'q' to exit.\n`);
+    // --- KEYBOARD ROUTER ---
+    private setupKeyboardListeners() {
+        readline.emitKeypressEvents(process.stdin);
+        if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-        // Calculate pagination window
+        process.stdin.on('keypress', (str, key) => {
+            if ((key.ctrl && key.name === 'c') || key.name === 'q') {
+                console.clear();
+                process.exit();
+            }
+
+            switch (this.viewState) {
+                case ViewState.HOME:
+                    if (key.name === '1') {
+                        this.viewState = ViewState.ORDERBOOK_LIST;
+                        this.renderOrderbookList();
+                    } else if (key.name === '2') {
+                        this.viewState = ViewState.POSITIONS;
+                        this.renderPositions();
+                    }
+                    break;
+
+                case ViewState.ORDERBOOK_LIST:
+                    if (key.name === 'up' && this.cursorIndex > 0) {
+                        this.cursorIndex--;
+                        this.renderOrderbookList();
+                    } else if (key.name === 'down' && this.cursorIndex < this.managers.length - 1) {
+                        this.cursorIndex++;
+                        this.renderOrderbookList();
+                    } else if (key.name === 'return' || key.name === 'enter') {
+                        this.viewState = ViewState.ORDERBOOK_LIVE;
+                        this.viewManager(this.managers[this.cursorIndex]);
+                    } else if (key.name === 'b') {
+                        this.viewState = ViewState.HOME;
+                        this.renderHome();
+                    }
+                    break;
+
+                case ViewState.ORDERBOOK_LIVE:
+                    if (key.name === 'b') {
+                        if (this.activeManager) this.activeManager.detachViewer();
+                        this.activeManager = null;
+                        this.viewState = ViewState.ORDERBOOK_LIST;
+                        this.renderOrderbookList();
+                    }
+                    break;
+
+                case ViewState.POSITIONS:
+                    if (key.name === 'b') {
+                        this.viewState = ViewState.HOME;
+                        this.renderHome();
+                    }
+                    break;
+            }
+        });
+    }
+
+    private clearScreenHelper() {
+        if (this.renderedLines > 0) {
+            process.stdout.write(`\x1B[${this.renderedLines}A\x1B[J`);
+        } else {
+            console.clear();
+        }
+    }
+
+    // --- SCREEN 1: HOME ---
+    private renderHome() {
+        if (this.viewState !== ViewState.HOME) return;
+        this.clearScreenHelper();
+
+        const totalEquity = this.portfolio.getTotalEquity();
+        const freeCash = this.portfolio.getAvailableCash();
+        const invested = this.portfolio.getInvestedCapital();
+        const pnl = this.portfolio.getRealizedPnL();
+        const positions = this.portfolio.getOpenPositions().length;
+
+        let output = `\n=============================================================\n`;
+        output += `                 ARBITRAGE COMMAND CENTER\n`;
+        output += `=============================================================\n\n`;
+
+        output += `  Total Equity      : $${totalEquity.toFixed(2)}\n`;
+        output += `  Free Cash         : $${freeCash.toFixed(2)}\n`;
+        output += `  Invested Capital  : $${invested.toFixed(2)}\n`;
+        output += `  Realized PnL      : ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}\n`;
+        output += `  Active Positions  : ${positions}\n\n`;
+
+        output += `=============================================================\n`;
+        output += `  [1] Market Orderbooks\n`;
+        output += `  [2] Active Positions\n`;
+        output += `  [q] Quit System\n`;
+        output += `=============================================================\n`;
+
+        this.renderedLines = output.split('\n').length - 1;
+        process.stdout.write(output);
+    }
+
+    // --- SCREEN 2: ACTIVE POSITIONS ---
+    private renderPositions() {
+        if (this.viewState !== ViewState.POSITIONS) return;
+        this.clearScreenHelper();
+
+        const positions = this.portfolio.getOpenPositions();
+
+        let output = `\n=============================================================\n`;
+        output += `                      ACTIVE POSITIONS (${positions.length})\n`;
+        output += `=============================================================\n\n`;
+
+        if (positions.length === 0) {
+            output += `  No active trades. Scanning for opportunities...\n\n`;
+        } else {
+            positions.forEach((pos, i) => {
+                output += `  [${i + 1}] ${pos.marketQuestion.substring(0, 50)}...\n`;
+                output += `      Type : ${pos.type}\n`;
+                output += `      Size : ${pos.size} contracts\n`;
+                output += `      Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice}¢ | Kalshi @ ${pos.kalshiEntryPrice}¢)\n\n`;
+            });
+        }
+
+        output += `=============================================================\n`;
+        output += `  [b] Back to Main Menu\n`;
+        output += `=============================================================\n`;
+
+        this.renderedLines = output.split('\n').length - 1;
+        process.stdout.write(output);
+    }
+
+    // --- SCREEN 3: ORDERBOOK LIST ---
+    private renderOrderbookList() {
+        if (this.viewState !== ViewState.ORDERBOOK_LIST) return;
+        this.clearScreenHelper();
+
+        let output = `\n=== SELECT MARKET TO MONITOR (${this.managers.length} Pairs) ===\n`;
+        output += `Use UP/DOWN arrows to navigate. Press ENTER to select. Press 'b' to go back.\n\n`;
+
         const pageStart = Math.floor(this.cursorIndex / this.PAGE_SIZE) * this.PAGE_SIZE;
         const pageEnd = Math.min(pageStart + this.PAGE_SIZE, this.managers.length);
 
@@ -39,68 +189,38 @@ export class CLI {
             const alignment = manager.pairData.outcomeAlignment === -1 ? "[FLIPPED]" : "[ALIGNED]";
 
             if (i === this.cursorIndex) {
-                console.log(`  > \x1b[36m[${i}] ${alignment} ${title}\x1b[0m`); // Cyan highlight
+                output += `  > \x1b[36m[${i}] ${alignment} ${title}\x1b[0m\n`; // Cyan highlight
             } else {
-                console.log(`    [${i}] ${alignment} ${title}`);
+                output += `    [${i}] ${alignment} ${title}\n`;
             }
         }
 
-        console.log(`\nShowing ${pageStart + 1}-${pageEnd} of ${this.managers.length}`);
+        output += `\nShowing ${pageStart + 1}-${pageEnd} of ${this.managers.length}\n`;
+
+        this.renderedLines = output.split('\n').length - 1;
+        process.stdout.write(output);
     }
 
-    private setupKeyboardListeners() {
-        readline.emitKeypressEvents(process.stdin);
-        if (process.stdin.isTTY) {
-            process.stdin.setRawMode(true);
-        }
-
-        process.stdin.on('keypress', (str, key) => {
-            // Global exit commands
-            if ((key.ctrl && key.name === 'c') || key.name === 'q') {
-                process.exit();
-            }
-
-            if (this.isMenuMode) {
-                if (key.name === 'up') {
-                    if (this.cursorIndex > 0) this.cursorIndex--;
-                    this.renderMenu();
-                }
-                else if (key.name === 'down') {
-                    if (this.cursorIndex < this.managers.length - 1) this.cursorIndex++;
-                    this.renderMenu();
-                }
-                else if (key.name === 'return' || key.name === 'enter') {
-                    this.viewManager(this.managers[this.cursorIndex]);
-                }
-            } else {
-                // In Dashboard Mode
-                if (key.name === 'b') {
-                    if (this.activeManager) this.activeManager.detachViewer();
-                    this.showMenu();
-                }
-            }
-        });
-    }
-
+    // --- SCREEN 4: LIVE ORDERBOOK VIEW ---
     private viewManager(manager: PairManager) {
-        this.isMenuMode = false;
         this.activeManager = manager;
         this.renderedLines = 0;
         console.clear();
 
-        manager.attachViewer(() => this.renderDashboard());
+        // Attach CLI to manager's instant update loop
+        manager.attachViewer(() => {
+            if (this.viewState === ViewState.ORDERBOOK_LIVE) this.renderDashboard();
+        });
         this.renderDashboard();
     }
 
     private renderDashboard() {
-        if (!this.activeManager || this.isMenuMode) return;
+        if (!this.activeManager || this.viewState !== ViewState.ORDERBOOK_LIVE) return;
 
         const poly = this.activeManager.latestPolyBook;
         const kalshi = this.activeManager.latestKalshiBook;
 
-        if (this.renderedLines > 0) {
-            process.stdout.write(`\x1B[${this.renderedLines}A\x1B[J`);
-        }
+        this.clearScreenHelper();
 
         const formatLevel = (lvl: any) => {
             if (!lvl) return "     ---    ".padEnd(17);
@@ -135,7 +255,7 @@ export class CLI {
         }
 
         output += `=============================================================\n`;
-        output += ` Press 'b' to return to menu | Press 'q' to exit\n`;
+        output += ` Press 'b' to return to list | Press 'q' to exit\n`;
 
         this.renderedLines = output.split('\n').length - 1;
         process.stdout.write(output);
