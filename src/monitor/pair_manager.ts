@@ -28,8 +28,13 @@ export class PairManager {
 
     private onUIUpdate: (() => void) | null = null;
 
+    // --- ARBITRAGE THROTTLING & EXECUTION CONTROLS ---
     private lastArbitrageTime: number = 0;
-    private readonly ARBITRAGE_COOLDOWN_MS: number = 10000;
+    private readonly ARBITRAGE_COOLDOWN_MS: number = 10000; // 10s cooldown
+
+    // Toggle for when we are ready to build live execution
+    private readonly PAPER_TRADE_MODE: boolean = true;
+    private readonly SIMULATED_LATENCY_MS: number = 1000; // 1 sec simulated execution delay
 
     constructor(pair: CandidatePair) {
         this.pairData = pair;
@@ -78,6 +83,7 @@ export class PairManager {
         if (!this.latestKalshiBook) return;
 
         const now = Date.now();
+        // Guard Clause: Block subsequent triggers while execution/cooldown is happening
         if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
 
         const polyYesFirst = this.latestPolyBook.yes?.asks?.[0];
@@ -89,45 +95,116 @@ export class PairManager {
 
         // --- SCENARIO 1: Outcomes are Aligned (+1) ---
         if (alignment === 1) {
-            // Poly Yes Ask + Kalshi No Ask
             if (polyYesFirst && kalshiNoFirst && (polyYesFirst.price + kalshiNoFirst.price < 0.97)) {
-                this.logArbitrageOpportunity('PolyYes_KalshiNo', polyYesFirst, kalshiNoFirst);
-                this.lastArbitrageTime = now;
+                this.lastArbitrageTime = now; // Lock immediately
+                this.triggerExecution('PolyYes_KalshiNo', polyYesFirst, kalshiNoFirst);
                 return;
             }
-            // Poly No Ask + Kalshi Yes Ask
             if (polyNoFirst && kalshiYesFirst && (polyNoFirst.price + kalshiYesFirst.price < 0.97)) {
-                this.logArbitrageOpportunity('PolyNo_KalshiYes', polyNoFirst, kalshiYesFirst);
                 this.lastArbitrageTime = now;
+                this.triggerExecution('PolyNo_KalshiYes', polyNoFirst, kalshiYesFirst);
+                return;
             }
         }
         // --- SCENARIO 2: Outcomes are Flipped (-1) ---
         else if (alignment === -1) {
-            // Because outcomes are flipped, Poly Yes = Kalshi No. 
-            // Therefore, a hedge requires buying Poly Yes AND Kalshi Yes.
             if (polyYesFirst && kalshiYesFirst && (polyYesFirst.price + kalshiYesFirst.price < 0.97)) {
-                this.logArbitrageOpportunity('PolyYes_KalshiYes (Flipped)', polyYesFirst, kalshiYesFirst);
                 this.lastArbitrageTime = now;
+                this.triggerExecution('PolyYes_KalshiYes_Flipped', polyYesFirst, kalshiYesFirst);
                 return;
             }
-            // The inverse hedge: Poly No AND Kalshi No
             if (polyNoFirst && kalshiNoFirst && (polyNoFirst.price + kalshiNoFirst.price < 0.97)) {
-                this.logArbitrageOpportunity('PolyNo_KalshiNo (Flipped)', polyNoFirst, kalshiNoFirst);
                 this.lastArbitrageTime = now;
+                this.triggerExecution('PolyNo_KalshiNo_Flipped', polyNoFirst, kalshiNoFirst);
+                return;
             }
         }
     }
 
-    private logArbitrageOpportunity(type: string, polyAsk: any, kalshiAsk: any) {
-        const time = new Date().toISOString();
-        const marketA = this.pairData.polyMarket.market_question;
-        const marketB = this.pairData.kalshiMarket.market_question;
+    // Router for Paper vs Live Trading
+    private triggerExecution(type: string, polyAskTarget: any, kalshiAskTarget: any) {
+        if (this.PAPER_TRADE_MODE) {
+            // Fire and forget the async paper trade simulation
+            this.executePaperTrade(type, polyAskTarget, kalshiAskTarget);
+        } else {
+            // TODO: Plug in Live Execution Engine here later
+            // e.g., ExecutionEngine.execute(type, pairData, polyAskTarget, kalshiAskTarget);
+        }
+    }
 
-        const msg = `[${time}] ARBITRAGE DETECTED [Spread: ${(polyAsk.price + kalshiAsk.price).toFixed(3)}]
-        Type: ${type}
-        Poly   : ${polyAsk.size} shares @ ${polyAsk.price} | ${marketA}
-        Kalshi : ${kalshiAsk.size} shares @ ${kalshiAsk.price} | ${marketB}
-        --------------------------------------------------\n`;
+    // --- PAPER TRADING SIMULATOR ---
+    private async executePaperTrade(type: string, detectedPolyAsk: any, detectedKalshiAsk: any) {
+        const timeDetected = new Date().toISOString();
+        const detectedSpread = (detectedPolyAsk.price + detectedKalshiAsk.price).toFixed(3);
+
+        // 1. Simulate the delay of network requests, API rate limits, and cryptographic signing
+        await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
+
+        // 2. Fetch the fresh state of the books T+1000ms later
+        let execPolyAsk: any = null;
+        let execKalshiAsk: any = null;
+
+        switch (type) {
+            case 'PolyYes_KalshiNo':
+                execPolyAsk = this.latestPolyBook.yes?.asks?.[0];
+                execKalshiAsk = this.latestKalshiBook!.no?.asks?.[0];
+                break;
+            case 'PolyNo_KalshiYes':
+                execPolyAsk = this.latestPolyBook.no?.asks?.[0];
+                execKalshiAsk = this.latestKalshiBook!.yes?.asks?.[0];
+                break;
+            case 'PolyYes_KalshiYes_Flipped':
+                execPolyAsk = this.latestPolyBook.yes?.asks?.[0];
+                execKalshiAsk = this.latestKalshiBook!.yes?.asks?.[0];
+                break;
+            case 'PolyNo_KalshiNo_Flipped':
+                execPolyAsk = this.latestPolyBook.no?.asks?.[0];
+                execKalshiAsk = this.latestKalshiBook!.no?.asks?.[0];
+                break;
+        }
+
+        // 3. Log the comparison to file
+        this.logPaperTradeResult(timeDetected, type, detectedSpread, detectedPolyAsk, detectedKalshiAsk, execPolyAsk, execKalshiAsk);
+    }
+
+    private logPaperTradeResult(
+        timeDetected: string,
+        type: string,
+        detectedSpread: string,
+        detPoly: any, detKalshi: any,
+        execPoly: any, execKalshi: any
+    ) {
+        const marketA = this.pairData.polyMarket.market_question;
+
+        // Calculate realized spread. If orderbook emptied out completely, mark as FAILED
+        let realizedSpreadStr = "FAILED (ORDERBOOK EMPTIED)";
+        let successFlag = "❌ MISSED";
+
+        if (execPoly && execKalshi) {
+            const realizedSpread = execPoly.price + execKalshi.price;
+            realizedSpreadStr = realizedSpread.toFixed(3);
+            if (realizedSpread < 0.99) { // We still made some profit even if it slipped
+                successFlag = "✅ CAPTURED";
+            } else {
+                successFlag = "⚠️ SLIPPED (UNPROFITABLE)";
+            }
+        }
+
+        const msg = `
+        ==================================================
+        [${timeDetected}] PAPER TRADE TRIGGERED: ${type}
+        Market: ${marketA.substring(0, 80)}...
+            
+        --- DETECTION (T=0) | Target Spread: ${detectedSpread} ---
+        Poly   : ${detPoly.size.toString().padStart(6)} shares @ ${detPoly.price.toFixed(3)}
+        Kalshi : ${detKalshi.size.toString().padStart(6)} shares @ ${detKalshi.price.toFixed(3)}
+            
+        --- EXECUTION (T+${this.SIMULATED_LATENCY_MS}ms) ---
+        Poly   : ${execPoly ? execPoly.size.toString().padStart(6) + ' shares @ ' + execPoly.price.toFixed(3) : 'BOOK EMPTY'}
+        Kalshi : ${execKalshi ? execKalshi.size.toString().padStart(6) + ' shares @ ' + execKalshi.price.toFixed(3) : 'BOOK EMPTY'}
+            
+        -> REALIZED SPREAD: ${realizedSpreadStr}  ${successFlag}
+        ==================================================\n`;
 
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
