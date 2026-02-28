@@ -5,6 +5,8 @@ import dotenv from 'dotenv';
 import pmxt from 'pmxtjs';
 import { PairManager, CandidatePair } from './monitor/pair_manager.js';
 import { CLI } from './cli/dashboard.js';
+import { PortfolioManager } from './portfolio/portfolio_manager.js';
+import { RiskManager } from './portfolio/risk_manager.js';
 
 dotenv.config({ override: true });
 
@@ -30,6 +32,11 @@ async function bootSystem() {
         return;
     }
 
+    // --- Initialize Global State Singletons ---
+    const INITIAL_CAPITAL = 10000;
+    const portfolio = new PortfolioManager(INITIAL_CAPITAL);
+    const riskManager = new RiskManager(portfolio);
+
     const activeManagers: PairManager[] = [];
 
     console.log(`[System] Initializing ${pairs.length} market pairs. Staggering network requests to avoid IP bans...`);
@@ -37,7 +44,9 @@ async function bootSystem() {
     // Load ALL pairs, but stagger the WebSocket connections by 200ms
     for (let i = 0; i < pairs.length; i++) {
         const pair = pairs[i];
-        const manager = new PairManager(pair);
+
+        // Pass the global singletons into each PairManager
+        const manager = new PairManager(pair, portfolio, riskManager);
 
         manager.start(); // Start background sync
         activeManagers.push(manager);
