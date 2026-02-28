@@ -39,48 +39,67 @@ export class PolymarketWS {
 
         ws.on('message', (data: WebSocket.RawData) => {
             const rawMsg = data.toString();
+
+            // Intercept heartbeat responses before JSON parsing
             if (rawMsg === "PONG") return;
 
             try {
-                const msg = JSON.parse(rawMsg);
+                const parsedData = JSON.parse(rawMsg);
 
-                if (msg.event_type === 'book') {
-                    const isYes = msg.asset_id === this.outcomeIdYes;
-                    const targetMap = isYes ? this.polyBooks.yes : this.polyBooks.no;
+                // THE FIX: Normalize incoming data. 
+                // Polymarket sends initial snapshots as an Array, but single deltas as Objects.
+                const messages = Array.isArray(parsedData) ? parsedData : [parsedData];
 
-                    targetMap.bids.clear();
-                    targetMap.asks.clear();
+                let updatedYes = false;
+                let updatedNo = false;
 
-                    msg.bids.forEach((b: any) => targetMap.bids.set(parseFloat(b.price), parseFloat(b.size)));
-                    msg.asks.forEach((a: any) => targetMap.asks.set(parseFloat(a.price), parseFloat(a.size)));
+                // Process every message in the payload
+                for (const msg of messages) {
 
-                    this.emitUpdate(isYes);
-                }
-                else if (msg.event_type === 'price_change') {
-                    let updatedYes = false;
-                    let updatedNo = false;
-
-                    msg.price_changes.forEach((change: any) => {
-                        const isYes = change.asset_id === this.outcomeIdYes;
+                    // 1. Initial Snapshot
+                    if (msg.event_type === 'book') {
+                        const isYes = msg.asset_id === this.outcomeIdYes;
                         const targetMap = isYes ? this.polyBooks.yes : this.polyBooks.no;
 
-                        const price = parseFloat(change.price);
-                        const size = parseFloat(change.size);
-                        const mapToUpdate = change.side === 'BUY' ? targetMap.bids : targetMap.asks;
+                        targetMap.bids.clear();
+                        targetMap.asks.clear();
 
-                        if (size === 0) {
-                            mapToUpdate.delete(price);
-                        } else {
-                            mapToUpdate.set(price, size);
-                        }
+                        if (msg.bids) msg.bids.forEach((b: any) => targetMap.bids.set(parseFloat(b.price), parseFloat(b.size)));
+                        if (msg.asks) msg.asks.forEach((a: any) => targetMap.asks.set(parseFloat(a.price), parseFloat(a.size)));
 
                         if (isYes) updatedYes = true;
                         else updatedNo = true;
-                    });
+                    }
 
-                    if (updatedYes) this.emitUpdate(true);
-                    if (updatedNo) this.emitUpdate(false);
+                    // 2. Real-Time Deltas
+                    else if (msg.event_type === 'price_change') {
+                        if (!msg.price_changes) continue;
+
+                        msg.price_changes.forEach((change: any) => {
+                            const isYes = change.asset_id === this.outcomeIdYes;
+                            const targetMap = isYes ? this.polyBooks.yes : this.polyBooks.no;
+
+                            const price = parseFloat(change.price);
+                            const size = parseFloat(change.size);
+                            const mapToUpdate = change.side === 'BUY' ? targetMap.bids : targetMap.asks;
+
+                            // If size is 0, the order was cancelled or filled. Remove it.
+                            if (size === 0) {
+                                mapToUpdate.delete(price);
+                            } else {
+                                mapToUpdate.set(price, size);
+                            }
+
+                            if (isYes) updatedYes = true;
+                            else updatedNo = true;
+                        });
+                    }
                 }
+
+                // Batch the UI emission so we don't spam the Orchestrator
+                if (updatedYes) this.emitUpdate(true);
+                if (updatedNo) this.emitUpdate(false);
+
             } catch (e) {
                 console.error("[PolyWS] Failed to parse message:", rawMsg);
             }
