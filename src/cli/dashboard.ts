@@ -117,7 +117,8 @@ export class CLI {
         this.clearScreenHelper();
 
         const totalEquity = this.portfolio.getTotalEquity();
-        const freeCash = this.portfolio.getAvailableCash();
+        const polyCash = this.portfolio.getPolyCash();
+        const kalshiCash = this.portfolio.getKalshiCash();
         const invested = this.portfolio.getInvestedCapital();
         const pnl = this.portfolio.getRealizedPnL();
         const positions = this.portfolio.getOpenPositions().length;
@@ -127,9 +128,13 @@ export class CLI {
         output += `=============================================================\n\n`;
 
         output += `  Total Equity      : $${totalEquity.toFixed(2)}\n`;
-        output += `  Free Cash         : $${freeCash.toFixed(2)}\n`;
         output += `  Invested Capital  : $${invested.toFixed(2)}\n`;
-        output += `  Realized PnL      : ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}\n`;
+        output += `  Realized PnL      : ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}\n\n`;
+
+        output += `  --- EXCHANGE WALLETS ---\n`;
+        output += `  Polymarket Cash   : $${polyCash.toFixed(2)}\n`;
+        output += `  Kalshi Cash       : $${kalshiCash.toFixed(2)}\n\n`;
+
         output += `  Active Positions  : ${positions}\n\n`;
 
         output += `=============================================================\n`;

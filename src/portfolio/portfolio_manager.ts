@@ -1,49 +1,47 @@
 import fs from 'fs';
 
 export interface Position {
-    pairId: string;             // A unique ID combining Poly and Kalshi IDs
-    marketQuestion: string;     // For human-readable logging
-    type: string;               // e.g., 'PolyYes_KalshiNo'
-    size: number;               // Number of contracts bought on BOTH exchanges
+    pairId: string;
+    marketQuestion: string;
+    type: string;
+    size: number;
     polyEntryPrice: number;
     kalshiEntryPrice: number;
-    totalCost: number;          // size * (polyEntryPrice + kalshiEntryPrice)
-    timestamp: number;          // Epoch time of entry
+    polyCost: number;           // NEW: Track exchange-specific cost
+    kalshiCost: number;         // NEW: Track exchange-specific cost
+    totalCost: number;
+    timestamp: number;
 }
 
 export class PortfolioManager {
-    private availableCash: number;
+    private polyCash: number;
+    private kalshiCash: number;
     private totalRealizedPnL: number = 0;
 
-    // Key: pairId -> Value: Position
     private openPositions: Map<string, Position> = new Map();
 
-    constructor(initialCapital: number) {
-        this.availableCash = initialCapital;
-        console.log(`[Portfolio] Initialized with $${initialCapital.toFixed(2)} cash.`);
+    constructor(initialPoly: number, initialKalshi: number) {
+        this.polyCash = initialPoly;
+        this.kalshiCash = initialKalshi;
+        console.log(`[Portfolio] Initialized. Poly: $${initialPoly} | Kalshi: $${initialKalshi}`);
     }
 
     // --- Core Ledger State ---
 
-    public getAvailableCash(): number {
-        return this.availableCash;
-    }
+    public getPolyCash(): number { return this.polyCash; }
+    public getKalshiCash(): number { return this.kalshiCash; }
+    public getTotalCash(): number { return this.polyCash + this.kalshiCash; }
 
     public getTotalEquity(): number {
-        let equity = this.availableCash;
+        let equity = this.getTotalCash();
         for (const position of this.openPositions.values()) {
             equity += position.totalCost;
         }
         return equity;
     }
 
-    public getRealizedPnL(): number {
-        return this.totalRealizedPnL;
-    }
-
-    public getOpenPositions(): Position[] {
-        return Array.from(this.openPositions.values());
-    }
+    public getRealizedPnL(): number { return this.totalRealizedPnL; }
+    public getOpenPositions(): Position[] { return Array.from(this.openPositions.values()); }
 
     public getInvestedCapital(): number {
         let invested = 0;
@@ -55,14 +53,8 @@ export class PortfolioManager {
 
     // --- Risk Management Lookups ---
 
-    public hasOpenPosition(pairId: string): boolean {
-        return this.openPositions.has(pairId);
-    }
-
-    public getPosition(pairId: string): Position | undefined {
-        return this.openPositions.get(pairId);
-    }
-
+    public hasOpenPosition(pairId: string): boolean { return this.openPositions.has(pairId); }
+    public getPosition(pairId: string): Position | undefined { return this.openPositions.get(pairId); }
     public getPairExposure(pairId: string): number {
         const position = this.openPositions.get(pairId);
         return position ? position.totalCost : 0;
@@ -70,9 +62,6 @@ export class PortfolioManager {
 
     // --- Execution Handlers ---
 
-    /**
-     * Called by the Execution Engine AFTER a successful entry fill.
-     */
     public openPosition(
         pairId: string,
         marketQuestion: string,
@@ -81,62 +70,48 @@ export class PortfolioManager {
         polyPrice: number,
         kalshiPrice: number
     ) {
-        if (this.openPositions.has(pairId)) {
-            console.warn(`[Portfolio] Warning: Attempted to open position for ${pairId}, but one already exists. Ignoring.`);
-            return;
-        }
+        if (this.openPositions.has(pairId)) return;
 
-        const totalCost = size * (polyPrice + kalshiPrice);
+        const polyCost = size * polyPrice;
+        const kalshiCost = size * kalshiPrice;
+        const totalCost = polyCost + kalshiCost;
 
-        // Sanity Check: Ensure we don't go negative
-        if (totalCost > this.availableCash) {
-            console.error(`[Portfolio] FATAL: Execution engine bypassed risk checks! Insufficient cash to open position.`);
+        // Strict dual-wallet sanity check
+        if (polyCost > this.polyCash || kalshiCost > this.kalshiCash) {
+            console.error(`[Portfolio] FATAL: Insufficient funds on one of the exchanges! PolyCost: ${polyCost}, KalshiCost: ${kalshiCost}`);
             return;
         }
 
         const newPosition: Position = {
-            pairId,
-            marketQuestion,
-            type,
-            size,
-            polyEntryPrice: polyPrice,
-            kalshiEntryPrice: kalshiPrice,
-            totalCost,
+            pairId, marketQuestion, type, size,
+            polyEntryPrice: polyPrice, kalshiEntryPrice: kalshiPrice,
+            polyCost, kalshiCost, totalCost,
             timestamp: Date.now()
         };
 
         this.openPositions.set(pairId, newPosition);
-        this.availableCash -= totalCost;
+        this.polyCash -= polyCost;
+        this.kalshiCash -= kalshiCost;
 
         this.logLedgerEvent(`OPEN`, newPosition);
     }
 
-    /**
-     * Called by the Execution Engine AFTER a successful exit fill.
-     */
-    public closePosition(
-        pairId: string,
-        polyExitPrice: number,
-        kalshiExitPrice: number
-    ) {
+    public closePosition(pairId: string, polyExitPrice: number, kalshiExitPrice: number) {
         const position = this.openPositions.get(pairId);
-        if (!position) {
-            console.warn(`[Portfolio] Warning: Attempted to close a non-existent position for ${pairId}.`);
-            return;
-        }
+        if (!position) return;
 
-        const exitRevenue = position.size * (polyExitPrice + kalshiExitPrice);
-        const pnl = exitRevenue - position.totalCost;
+        const polyRevenue = position.size * polyExitPrice;
+        const kalshiRevenue = position.size * kalshiExitPrice;
+        const totalRevenue = polyRevenue + kalshiRevenue;
+        const pnl = totalRevenue - position.totalCost;
 
-        this.availableCash += exitRevenue;
+        this.polyCash += polyRevenue;
+        this.kalshiCash += kalshiRevenue;
         this.totalRealizedPnL += pnl;
 
         this.openPositions.delete(pairId);
-
-        this.logLedgerEvent(`CLOSE`, position, pnl, exitRevenue);
+        this.logLedgerEvent(`CLOSE`, position, pnl, totalRevenue);
     }
-
-    // --- Auditing & Diagnostics ---
 
     private logLedgerEvent(action: string, position: Position, pnl: number = 0, revenue: number = 0) {
         const time = new Date().toISOString();
@@ -144,23 +119,14 @@ export class PortfolioManager {
         msg += `  Size: ${position.size} | Type: ${position.type}\n`;
 
         if (action === 'OPEN') {
-            msg += `  Cost: $${position.totalCost.toFixed(2)} -> Remaining Cash: $${this.availableCash.toFixed(2)}\n`;
+            msg += `  Cost: Poly $${position.polyCost.toFixed(2)} | Kalshi $${position.kalshiCost.toFixed(2)}\n`;
+            msg += `  New Balances: Poly $${this.polyCash.toFixed(2)} | Kalshi $${this.kalshiCash.toFixed(2)}\n`;
         } else {
-            const prefix = pnl >= 0 ? '+' : '';
-            msg += `  Exit Revenue: $${revenue.toFixed(2)} | PnL: ${prefix}$${pnl.toFixed(2)}\n`;
-            msg += `  Total Equity: $${this.getTotalEquity().toFixed(2)} | Total PnL: $${this.totalRealizedPnL.toFixed(2)}\n`;
+            msg += `  Exit Revenue: $${revenue.toFixed(2)} | PnL: $${pnl.toFixed(2)}\n`;
+            msg += `  Total Equity: $${this.getTotalEquity().toFixed(2)}\n`;
         }
         msg += `--------------------------------------------------\n`;
 
         fs.appendFileSync('portfolio_ledger.txt', msg, 'utf8');
-    }
-
-    public printSummary() {
-        console.log(`\n=== PORTFOLIO SUMMARY ===`);
-        console.log(`Total Equity  : $${this.getTotalEquity().toFixed(2)}`);
-        console.log(`Available Cash: $${this.availableCash.toFixed(2)}`);
-        console.log(`Realized PnL  : $${this.totalRealizedPnL.toFixed(2)}`);
-        console.log(`Open Positions: ${this.openPositions.size}`);
-        console.log(`=========================\n`);
     }
 }

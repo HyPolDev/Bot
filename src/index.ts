@@ -33,8 +33,9 @@ async function bootSystem() {
     }
 
     // --- Initialize Global State Singletons ---
-    const INITIAL_CAPITAL = 10000;
-    const portfolio = new PortfolioManager(INITIAL_CAPITAL);
+    const INITIAL_POLY_CASH = 5000;
+    const INITIAL_KALSHI_CASH = 5000;
+    const portfolio = new PortfolioManager(INITIAL_POLY_CASH, INITIAL_KALSHI_CASH);
     const riskManager = new RiskManager(portfolio);
 
     const activeManagers: PairManager[] = [];
