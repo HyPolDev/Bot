@@ -41,6 +41,18 @@ export class PortfolioManager {
         return this.totalRealizedPnL;
     }
 
+    public getOpenPositions(): Position[] {
+        return Array.from(this.openPositions.values());
+    }
+
+    public getInvestedCapital(): number {
+        let invested = 0;
+        for (const position of this.openPositions.values()) {
+            invested += position.totalCost;
+        }
+        return invested;
+    }
+
     // --- Risk Management Lookups ---
 
     public hasOpenPosition(pairId: string): boolean {
