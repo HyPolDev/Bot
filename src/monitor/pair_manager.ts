@@ -61,6 +61,7 @@ export class PairManager {
                 else this.latestPolyBook.no = { bids: updatedSide.bids, asks: updatedSide.asks };
 
                 this.evaluateEntry();
+                this.evaluateExit();
                 if (this.onUIUpdate) this.onUIUpdate();
             });
 
@@ -68,6 +69,7 @@ export class PairManager {
                 this.latestKalshiBook = fullBook;
 
                 this.evaluateEntry();
+                this.evaluateExit()
                 if (this.onUIUpdate) this.onUIUpdate();
             });
 
@@ -87,7 +89,6 @@ export class PairManager {
         this.onUIUpdate = null;
     }
 
-    // Renamed from evaluateArbitrage to evaluateEntry to prepare for evaluateExit
     private evaluateEntry() {
         if (!this.latestKalshiBook) return;
 
@@ -222,6 +223,113 @@ Kalshi : ${execKalshiAsk ? execKalshiAsk.size.toString().padStart(6) + ' shares 
 
 -> REALIZED SPREAD: ${realizedSpreadStr}  ${successFlag}
 -> FILLED SIZE: ${filledSize}
+==================================================\n`;
+
+        fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
+    }
+
+    // --- THE EXIT STRATEGY ---
+    private evaluateExit() {
+        // 1. Guard Clause: Do we even own this pair?
+        const position = this.portfolio.getPosition(this.pairId);
+        if (!position) return;
+        if (!this.latestKalshiBook) return;
+
+        const now = Date.now();
+        if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
+
+        // 3. We want to SELL, so we look at the BIDS (Buyers)
+        const polyYesBid = this.latestPolyBook.yes?.bids?.[0];
+        const polyNoBid = this.latestPolyBook.no?.bids?.[0];
+        const kalshiYesBid = this.latestKalshiBook?.yes?.bids?.[0];
+        const kalshiNoBid = this.latestKalshiBook?.no?.bids?.[0];
+
+        let targetPolyBid: any = null;
+        let targetKalshiBid: any = null;
+
+        // 3. Match the Bids to the exact position type we hold
+        switch (position.type) {
+            case 'PolyYes_KalshiNo':
+                targetPolyBid = polyYesBid; targetKalshiBid = kalshiNoBid; break;
+            case 'PolyNo_KalshiYes':
+                targetPolyBid = polyNoBid; targetKalshiBid = kalshiYesBid; break;
+            case 'PolyYes_KalshiYes_Flipped':
+                targetPolyBid = polyYesBid; targetKalshiBid = kalshiYesBid; break;
+            case 'PolyNo_KalshiNo_Flipped':
+                targetPolyBid = polyNoBid; targetKalshiBid = kalshiNoBid; break;
+        }
+
+        // 4. Check if the Exit Spread is profitable
+        if (targetPolyBid && targetKalshiBid) {
+            const combinedBid = targetPolyBid.price + targetKalshiBid.price;
+
+            // EXIT THRESHOLD: We want to sell for >= $0.99 to capture the margin
+            if (combinedBid >= 0.99) {
+                this.lastArbitrageTime = now;
+                if (this.PAPER_TRADE_MODE) {
+                    this.executePaperExit(position, targetPolyBid, targetKalshiBid);
+                }
+            }
+        }
+    }
+
+    private async executePaperExit(position: any, detectedPolyBid: any, detectedKalshiBid: any) {
+        const timeDetected = new Date().toISOString();
+        const detectedCombinedBid = (detectedPolyBid.price + detectedKalshiBid.price).toFixed(3);
+
+        await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
+
+        let execPolyBid: any = null;
+        let execKalshiBid: any = null;
+
+        // Fetch fresh bids
+        switch (position.type) {
+            case 'PolyYes_KalshiNo':
+                execPolyBid = this.latestPolyBook.yes?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.no?.bids?.[0]; break;
+            case 'PolyNo_KalshiYes':
+                execPolyBid = this.latestPolyBook.no?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.yes?.bids?.[0]; break;
+            case 'PolyYes_KalshiYes_Flipped':
+                execPolyBid = this.latestPolyBook.yes?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.yes?.bids?.[0]; break;
+            case 'PolyNo_KalshiNo_Flipped':
+                execPolyBid = this.latestPolyBook.no?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.no?.bids?.[0]; break;
+        }
+
+        let realizedBidStr = "FAILED (BUYERS DISAPPEARED)";
+        let successFlag = "❌ MISSED EXIT";
+
+        if (execPolyBid && execKalshiBid) {
+            const realizedBid = execPolyBid.price + execKalshiBid.price;
+
+            // As long as the realized exit price is safely above our entry cost, we sell!
+            const entryCostPerShare = position.polyEntryPrice + position.kalshiEntryPrice;
+
+            if (realizedBid > entryCostPerShare) {
+                realizedBidStr = realizedBid.toFixed(3);
+                successFlag = "✅ PROFIT REALIZED";
+
+                // We can only sell as many shares as the buyers are willing to buy
+                const exitSize = Math.min(position.size, execPolyBid.size, execKalshiBid.size);
+
+                if (exitSize > 0) {
+                    this.portfolio.closePosition(this.pairId, exitSize, execPolyBid.price, execKalshiBid.price);
+                }
+            } else {
+                realizedBidStr = `${realizedBid.toFixed(3)} (TOO LOW)`;
+                successFlag = "⚠️ SLIPPED (EXIT ABORTED to avoid loss)";
+            }
+        }
+
+        const msg = `
+==================================================
+[${timeDetected}] PAPER EXIT TRIGGERED: ${position.type}
+Market: ${this.pairData.polyMarket.market_question.substring(0, 80)}...
+
+--- EXIT DETECTION (T=0) | Target Revenue: ${detectedCombinedBid} ---
+Poly   : ${detectedPolyBid.size.toString().padStart(6)} buyers @ ${detectedPolyBid.price.toFixed(3)}
+Kalshi : ${detectedKalshiBid.size.toString().padStart(6)} buyers @ ${detectedKalshiBid.price.toFixed(3)}
+
+--- EXECUTION (T+${this.SIMULATED_LATENCY_MS}ms) ---
+-> REALIZED REVENUE: ${realizedBidStr}  ${successFlag}
 ==================================================\n`;
 
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');

@@ -96,21 +96,38 @@ export class PortfolioManager {
         this.logLedgerEvent(`OPEN`, newPosition);
     }
 
-    public closePosition(pairId: string, polyExitPrice: number, kalshiExitPrice: number) {
+    public closePosition(pairId: string, exitSize: number, polyExitPrice: number, kalshiExitPrice: number) {
         const position = this.openPositions.get(pairId);
         if (!position) return;
 
-        const polyRevenue = position.size * polyExitPrice;
-        const kalshiRevenue = position.size * kalshiExitPrice;
+        // We cannot exit more shares than we actually own
+        const actualExitSize = Math.min(exitSize, position.size);
+
+        const polyRevenue = actualExitSize * polyExitPrice;
+        const kalshiRevenue = actualExitSize * kalshiExitPrice;
         const totalRevenue = polyRevenue + kalshiRevenue;
-        const pnl = totalRevenue - position.totalCost;
+
+        // Calculate the exact cost basis of the shares we are selling
+        const costBasis = actualExitSize * (position.polyEntryPrice + position.kalshiEntryPrice);
+        const pnl = totalRevenue - costBasis;
 
         this.polyCash += polyRevenue;
         this.kalshiCash += kalshiRevenue;
         this.totalRealizedPnL += pnl;
 
-        this.openPositions.delete(pairId);
-        this.logLedgerEvent(`CLOSE`, position, pnl, totalRevenue);
+        // If we sold everything, delete the position. Otherwise, update the remaining balances.
+        if (actualExitSize === position.size) {
+            this.openPositions.delete(pairId);
+        } else {
+            position.size -= actualExitSize;
+            position.polyCost -= (actualExitSize * position.polyEntryPrice);
+            position.kalshiCost -= (actualExitSize * position.kalshiEntryPrice);
+            position.totalCost -= costBasis;
+        }
+
+        // Pass a cloned object to the logger so it records the exit size, not the remaining size
+        const logPosition = { ...position, size: actualExitSize };
+        this.logLedgerEvent(`CLOSE`, logPosition, pnl, totalRevenue);
     }
 
     private logLedgerEvent(action: string, position: Position, pnl: number = 0, revenue: number = 0) {
