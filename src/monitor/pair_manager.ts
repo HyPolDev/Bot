@@ -238,7 +238,7 @@ Kalshi : ${execKalshiAsk ? execKalshiAsk.size.toString().padStart(6) + ' shares 
         const now = Date.now();
         if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
 
-        // 3. We want to SELL, so we look at the BIDS (Buyers)
+        // 2. We want to SELL, so we look at the BIDS (Buyers)
         const polyYesBid = this.latestPolyBook.yes?.bids?.[0];
         const polyNoBid = this.latestPolyBook.no?.bids?.[0];
         const kalshiYesBid = this.latestKalshiBook?.yes?.bids?.[0];
@@ -265,15 +265,21 @@ Kalshi : ${execKalshiAsk ? execKalshiAsk.size.toString().padStart(6) + ' shares 
 
             // EXIT THRESHOLD: We want to sell for >= $0.99 to capture the margin
             if (combinedBid >= 0.99) {
-                this.lastArbitrageTime = now;
-                if (this.PAPER_TRADE_MODE) {
-                    this.executePaperExit(position, targetPolyBid, targetKalshiBid);
+                // EXIT SIZING RULE: Half of the smallest bid, capped by what we actually own
+                const baseExitSize = Math.floor(Math.min(targetPolyBid.size, targetKalshiBid.size) / 2);
+                const approvedExitSize = Math.min(position.size, baseExitSize);
+
+                if (approvedExitSize > 0) {
+                    this.lastArbitrageTime = now;
+                    if (this.PAPER_TRADE_MODE) {
+                        this.executePaperExit(position, targetPolyBid, targetKalshiBid, approvedExitSize);
+                    }
                 }
             }
         }
     }
 
-    private async executePaperExit(position: any, detectedPolyBid: any, detectedKalshiBid: any) {
+    private async executePaperExit(position: any, detectedPolyBid: any, detectedKalshiBid: any, approvedExitSize: number) {
         const timeDetected = new Date().toISOString();
         const detectedCombinedBid = (detectedPolyBid.price + detectedKalshiBid.price).toFixed(3);
 
@@ -296,6 +302,7 @@ Kalshi : ${execKalshiAsk ? execKalshiAsk.size.toString().padStart(6) + ' shares 
 
         let realizedBidStr = "FAILED (BUYERS DISAPPEARED)";
         let successFlag = "❌ MISSED EXIT";
+        let filledSize = 0;
 
         if (execPolyBid && execKalshiBid) {
             const realizedBid = execPolyBid.price + execKalshiBid.price;
@@ -307,11 +314,11 @@ Kalshi : ${execKalshiAsk ? execKalshiAsk.size.toString().padStart(6) + ' shares 
                 realizedBidStr = realizedBid.toFixed(3);
                 successFlag = "✅ PROFIT REALIZED";
 
-                // We can only sell as many shares as the buyers are willing to buy
-                const exitSize = Math.min(position.size, execPolyBid.size, execKalshiBid.size);
+                // Recalculate fill size based on the fresh orderbook at T+1, capped by our approved size
+                filledSize = Math.min(approvedExitSize, execPolyBid.size, execKalshiBid.size);
 
-                if (exitSize > 0) {
-                    this.portfolio.closePosition(this.pairId, exitSize, execPolyBid.price, execKalshiBid.price);
+                if (filledSize > 0) {
+                    this.portfolio.closePosition(this.pairId, filledSize, execPolyBid.price, execKalshiBid.price);
                 }
             } else {
                 realizedBidStr = `${realizedBid.toFixed(3)} (TOO LOW)`;
@@ -323,13 +330,18 @@ Kalshi : ${execKalshiAsk ? execKalshiAsk.size.toString().padStart(6) + ' shares 
 ==================================================
 [${timeDetected}] PAPER EXIT TRIGGERED: ${position.type}
 Market: ${this.pairData.polyMarket.market_question.substring(0, 80)}...
+Approved Attempt Size: ${approvedExitSize} contracts
 
 --- EXIT DETECTION (T=0) | Target Revenue: ${detectedCombinedBid} ---
 Poly   : ${detectedPolyBid.size.toString().padStart(6)} buyers @ ${detectedPolyBid.price.toFixed(3)}
 Kalshi : ${detectedKalshiBid.size.toString().padStart(6)} buyers @ ${detectedKalshiBid.price.toFixed(3)}
 
 --- EXECUTION (T+${this.SIMULATED_LATENCY_MS}ms) ---
+Poly   : ${execPolyBid ? execPolyBid.size.toString().padStart(6) + ' buyers @ ' + execPolyBid.price.toFixed(3) : 'BOOK EMPTY'}
+Kalshi : ${execKalshiBid ? execKalshiBid.size.toString().padStart(6) + ' buyers @ ' + execKalshiBid.price.toFixed(3) : 'BOOK EMPTY'}
+
 -> REALIZED REVENUE: ${realizedBidStr}  ${successFlag}
+-> FILLED SIZE: ${filledSize}
 ==================================================\n`;
 
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
