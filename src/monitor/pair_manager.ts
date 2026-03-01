@@ -21,12 +21,11 @@ export interface CandidatePair {
 
 export class PairManager {
     public pairData: CandidatePair;
-    public readonly pairId: string; // Unique ID for the portfolio ledger
+    public readonly pairId: string;
 
     private polyWsClient: PolymarketWS | null = null;
     private kalshiWsClient: KalshiWS | null = null;
 
-    // Global State Singletons passed from Orchestrator
     private portfolio: PortfolioManager;
     private risk: RiskManager;
 
@@ -69,7 +68,7 @@ export class PairManager {
                 this.latestKalshiBook = fullBook;
 
                 this.evaluateEntry();
-                this.evaluateExit()
+                this.evaluateExit();
                 if (this.onUIUpdate) this.onUIUpdate();
             });
 
@@ -89,259 +88,217 @@ export class PairManager {
         this.onUIUpdate = null;
     }
 
+    // ==========================================
+    // --- VWAP ENGINE ---
+    // ==========================================
+    private calculateSweep(
+        polyLevels: any[], kalshiLevels: any[], isEntry: boolean, absoluteMax: number = Infinity
+    ): { size: number, polyVwap: number, kalshiVwap: number } {
+        if (!polyLevels || !kalshiLevels) return { size: 0, polyVwap: 0, kalshiVwap: 0 };
+
+        let pIdx = 0; let kIdx = 0;
+        // Deep clone so we can safely deduct liquidity while simulating the sweep
+        const pBook = polyLevels.map(l => ({ ...l }));
+        const kBook = kalshiLevels.map(l => ({ ...l }));
+
+        let totalShares = 0;
+        let polyCost = 0;
+        let kalshiCost = 0;
+
+        while (pIdx < pBook.length && kIdx < kBook.length && totalShares < absoluteMax) {
+            const p = pBook[pIdx];
+            const k = kBook[kIdx];
+
+            const combinedPrice = p.price + k.price;
+
+            // Threshold Check
+            if (isEntry && combinedPrice >= 0.97) break;
+            if (!isEntry && combinedPrice < 0.99) break;
+
+            const overlap = Math.min(p.size, k.size);
+            if (overlap <= 0) break;
+
+            // Apply Safety Halving Rule
+            let safeTake = Math.floor(overlap / 2);
+            safeTake = Math.min(safeTake, absoluteMax - totalShares); // Cap by remaining need
+
+            if (safeTake <= 0) break; // Reached dust limits
+
+            totalShares += safeTake;
+            polyCost += safeTake * p.price;
+            kalshiCost += safeTake * k.price;
+
+            // Consume the raw liquidity from our simulation
+            p.size -= overlap;
+            k.size -= overlap;
+
+            if (p.size <= 0) pIdx++;
+            if (k.size <= 0) kIdx++;
+        }
+
+        return {
+            size: totalShares,
+            polyVwap: totalShares > 0 ? polyCost / totalShares : 0,
+            kalshiVwap: totalShares > 0 ? kalshiCost / totalShares : 0
+        };
+    }
+
+    // ==========================================
+    // --- ENTRY LOGIC ---
+    // ==========================================
     private evaluateEntry() {
         if (!this.latestKalshiBook) return;
-
         const now = Date.now();
         if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
-
-        const polyYesFirst = this.latestPolyBook.yes?.asks?.[0];
-        const polyNoFirst = this.latestPolyBook.no?.asks?.[0];
-        const kalshiYesFirst = this.latestKalshiBook.yes?.asks?.[0];
-        const kalshiNoFirst = this.latestKalshiBook.no?.asks?.[0];
 
         const alignment = this.pairData.outcomeAlignment;
 
         if (alignment === 1) {
-            if (polyYesFirst && kalshiNoFirst && (polyYesFirst.price + kalshiNoFirst.price < 0.97)) {
-                this.processEntrySignal('PolyYes_KalshiNo', polyYesFirst, kalshiNoFirst);
-                return;
-            }
-            if (polyNoFirst && kalshiYesFirst && (polyNoFirst.price + kalshiYesFirst.price < 0.97)) {
-                this.processEntrySignal('PolyNo_KalshiYes', polyNoFirst, kalshiYesFirst);
-                return;
-            }
+            this.checkAndTriggerEntry('PolyYes_KalshiNo', this.latestPolyBook.yes?.asks, this.latestKalshiBook.no?.asks);
+            this.checkAndTriggerEntry('PolyNo_KalshiYes', this.latestPolyBook.no?.asks, this.latestKalshiBook.yes?.asks);
         } else if (alignment === -1) {
-            if (polyYesFirst && kalshiYesFirst && (polyYesFirst.price + kalshiYesFirst.price < 0.97)) {
-                this.processEntrySignal('PolyYes_KalshiYes_Flipped', polyYesFirst, kalshiYesFirst);
-                return;
-            }
-            if (polyNoFirst && kalshiNoFirst && (polyNoFirst.price + kalshiNoFirst.price < 0.97)) {
-                this.processEntrySignal('PolyNo_KalshiNo_Flipped', polyNoFirst, kalshiNoFirst);
-                return;
+            this.checkAndTriggerEntry('PolyYes_KalshiYes_Flipped', this.latestPolyBook.yes?.asks, this.latestKalshiBook.yes?.asks);
+            this.checkAndTriggerEntry('PolyNo_KalshiNo_Flipped', this.latestPolyBook.no?.asks, this.latestKalshiBook.no?.asks);
+        }
+    }
+
+    private checkAndTriggerEntry(type: string, polyAsks: any[], kalshiAsks: any[]) {
+        const sweep = this.calculateSweep(polyAsks, kalshiAsks, true);
+
+        if (sweep.size > 0) {
+            // Trick the RiskManager: We already halved the size in the sweeper, 
+            // so we pass sweep.size * 2 into RiskManager so its internal halving returns our exact sweep size.
+            const approvedSize = this.risk.calculateApprovedSize(
+                this.pairId, sweep.polyVwap, sweep.kalshiVwap, sweep.size * 2, sweep.size * 2
+            );
+
+            if (approvedSize > 0) {
+                this.lastArbitrageTime = Date.now();
+                if (this.PAPER_TRADE_MODE) {
+                    this.executePaperTrade(type, polyAsks, kalshiAsks, approvedSize, sweep.polyVwap + sweep.kalshiVwap);
+                }
             }
         }
     }
 
-    private processEntrySignal(type: string, polyAskTarget: any, kalshiAskTarget: any) {
-        const approvedSize = this.risk.calculateApprovedSize(
-            this.pairId,
-            polyAskTarget.price,
-            kalshiAskTarget.price,
-            polyAskTarget.size,
-            kalshiAskTarget.size
-        );
-
-        if (approvedSize > 0) {
-            this.lastArbitrageTime = Date.now(); // Lock cooldown
-
-            if (this.PAPER_TRADE_MODE) {
-                this.executePaperTrade(type, polyAskTarget, kalshiAskTarget, approvedSize);
-            } else {
-                // Future Live Execution
-            }
-        }
-    }
-
-    private async executePaperTrade(type: string, detectedPolyAsk: any, detectedKalshiAsk: any, approvedSize: number) {
+    private async executePaperTrade(type: string, detectedPolyAsks: any[], detectedKalshiAsks: any[], approvedSize: number, detectedSpread: number) {
         const timeDetected = new Date().toISOString();
-        const detectedSpread = (detectedPolyAsk.price + detectedKalshiAsk.price).toFixed(3);
-
-        // 1. Simulate Latency
         await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
 
-        // 2. Fetch fresh orderbook state
-        let execPolyAsk: any = null;
-        let execKalshiAsk: any = null;
+        let execPolyAsks: any[] = []; let execKalshiAsks: any[] = [];
 
         switch (type) {
-            case 'PolyYes_KalshiNo':
-                execPolyAsk = this.latestPolyBook.yes?.asks?.[0];
-                execKalshiAsk = this.latestKalshiBook!.no?.asks?.[0];
-                break;
-            case 'PolyNo_KalshiYes':
-                execPolyAsk = this.latestPolyBook.no?.asks?.[0];
-                execKalshiAsk = this.latestKalshiBook!.yes?.asks?.[0];
-                break;
-            case 'PolyYes_KalshiYes_Flipped':
-                execPolyAsk = this.latestPolyBook.yes?.asks?.[0];
-                execKalshiAsk = this.latestKalshiBook!.yes?.asks?.[0];
-                break;
-            case 'PolyNo_KalshiNo_Flipped':
-                execPolyAsk = this.latestPolyBook.no?.asks?.[0];
-                execKalshiAsk = this.latestKalshiBook!.no?.asks?.[0];
-                break;
+            case 'PolyYes_KalshiNo': execPolyAsks = this.latestPolyBook.yes?.asks; execKalshiAsks = this.latestKalshiBook!.no?.asks; break;
+            case 'PolyNo_KalshiYes': execPolyAsks = this.latestPolyBook.no?.asks; execKalshiAsks = this.latestKalshiBook!.yes?.asks; break;
+            case 'PolyYes_KalshiYes_Flipped': execPolyAsks = this.latestPolyBook.yes?.asks; execKalshiAsks = this.latestKalshiBook!.yes?.asks; break;
+            case 'PolyNo_KalshiNo_Flipped': execPolyAsks = this.latestPolyBook.no?.asks; execKalshiAsks = this.latestKalshiBook!.no?.asks; break;
         }
 
-        // 3. Evaluate Slippage & Final Fill Size
-        let realizedSpreadStr = "FAILED (ORDERBOOK EMPTIED/MOVED)";
+        // SWEEP THE FRESH ORDERBOOK AT T+1s
+        const realSweep = this.calculateSweep(execPolyAsks, execKalshiAsks, true, approvedSize);
+
+        let realizedSpreadStr = "FAILED (MOVED/EMPTIED)";
         let successFlag = "❌ MISSED";
-        let filledSize = 0;
 
-        if (execPolyAsk && execKalshiAsk) {
-            const realizedSpread = execPolyAsk.price + execKalshiAsk.price;
+        if (realSweep.size > 0) {
+            const realizedSpread = realSweep.polyVwap + realSweep.kalshiVwap;
+            realizedSpreadStr = realizedSpread.toFixed(3);
+            successFlag = "✅ CAPTURED";
 
-            // If spread is still under 0.99, we execute
-            if (realizedSpread <= 0.99) {
-                // Re-calculate size in case liquidity dropped during the 1-second delay
-                filledSize = Math.min(approvedSize, execPolyAsk.size, execKalshiAsk.size);
-
-                if (filledSize > 0) {
-                    realizedSpreadStr = realizedSpread.toFixed(3);
-                    successFlag = "✅ CAPTURED";
-
-                    // OPEN THE POSITION IN THE PORTFOLIO LEDGER
-                    this.portfolio.openPosition(
-                        this.pairId,
-                        this.pairData.polyMarket.market_question,
-                        type,
-                        filledSize,
-                        execPolyAsk.price,
-                        execKalshiAsk.price
-                    );
-                }
-            } else {
-                realizedSpreadStr = `${realizedSpread.toFixed(3)} (TOO HIGH)`;
-                successFlag = "⚠️ SLIPPED";
-            }
+            this.portfolio.openPosition(
+                this.pairId, this.pairData.polyMarket.market_question, type,
+                realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap
+            );
         }
 
-        // 4. Log the result
         const msg = `
 ==================================================
-[${timeDetected}] PAPER TRADE TRIGGERED: ${type}
+[${timeDetected}] PAPER ENTRY: ${type}
 Market: ${this.pairData.polyMarket.market_question.substring(0, 80)}...
-Approved Attempt Size: ${approvedSize} contracts
-
---- DETECTION (T=0) | Target Spread: ${detectedSpread} ---
-Poly   : ${detectedPolyAsk.size.toString().padStart(6)} shares @ ${detectedPolyAsk.price.toFixed(3)}
-Kalshi : ${detectedKalshiAsk.size.toString().padStart(6)} shares @ ${detectedKalshiAsk.price.toFixed(3)}
+Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
 
 --- EXECUTION (T+${this.SIMULATED_LATENCY_MS}ms) ---
-Poly   : ${execPolyAsk ? execPolyAsk.size.toString().padStart(6) + ' shares @ ' + execPolyAsk.price.toFixed(3) : 'BOOK EMPTY'}
-Kalshi : ${execKalshiAsk ? execKalshiAsk.size.toString().padStart(6) + ' shares @ ' + execKalshiAsk.price.toFixed(3) : 'BOOK EMPTY'}
-
--> REALIZED SPREAD: ${realizedSpreadStr}  ${successFlag}
--> FILLED SIZE: ${filledSize}
+-> REALIZED VWAP: ${realizedSpreadStr}  ${successFlag}
+-> FILLED SIZE: ${realSweep.size}
 ==================================================\n`;
 
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
 
-    // --- THE EXIT STRATEGY ---
+    // ==========================================
+    // --- EXIT LOGIC ---
+    // ==========================================
     private evaluateExit() {
-        // 1. Guard Clause: Do we even own this pair?
         const position = this.portfolio.getPosition(this.pairId);
-        if (!position) return;
-        if (!this.latestKalshiBook) return;
+        if (!position || !this.latestKalshiBook) return;
 
         const now = Date.now();
         if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
 
-        // 2. We want to SELL, so we look at the BIDS (Buyers)
-        const polyYesBid = this.latestPolyBook.yes?.bids?.[0];
-        const polyNoBid = this.latestPolyBook.no?.bids?.[0];
-        const kalshiYesBid = this.latestKalshiBook?.yes?.bids?.[0];
-        const kalshiNoBid = this.latestKalshiBook?.no?.bids?.[0];
+        let targetPolyBids: any[] = []; let targetKalshiBids: any[] = [];
 
-        let targetPolyBid: any = null;
-        let targetKalshiBid: any = null;
-
-        // 3. Match the Bids to the exact position type we hold
         switch (position.type) {
-            case 'PolyYes_KalshiNo':
-                targetPolyBid = polyYesBid; targetKalshiBid = kalshiNoBid; break;
-            case 'PolyNo_KalshiYes':
-                targetPolyBid = polyNoBid; targetKalshiBid = kalshiYesBid; break;
-            case 'PolyYes_KalshiYes_Flipped':
-                targetPolyBid = polyYesBid; targetKalshiBid = kalshiYesBid; break;
-            case 'PolyNo_KalshiNo_Flipped':
-                targetPolyBid = polyNoBid; targetKalshiBid = kalshiNoBid; break;
+            case 'PolyYes_KalshiNo': targetPolyBids = this.latestPolyBook.yes?.bids; targetKalshiBids = this.latestKalshiBook.no?.bids; break;
+            case 'PolyNo_KalshiYes': targetPolyBids = this.latestPolyBook.no?.bids; targetKalshiBids = this.latestKalshiBook.yes?.bids; break;
+            case 'PolyYes_KalshiYes_Flipped': targetPolyBids = this.latestPolyBook.yes?.bids; targetKalshiBids = this.latestKalshiBook.yes?.bids; break;
+            case 'PolyNo_KalshiNo_Flipped': targetPolyBids = this.latestPolyBook.no?.bids; targetKalshiBids = this.latestKalshiBook.no?.bids; break;
         }
 
-        // 4. Check if the Exit Spread is profitable
-        if (targetPolyBid && targetKalshiBid) {
-            const combinedBid = targetPolyBid.price + targetKalshiBid.price;
+        // SWEEP BIDS to check if we can sell profitably
+        const sweep = this.calculateSweep(targetPolyBids, targetKalshiBids, false, position.size);
 
-            // EXIT THRESHOLD: We want to sell for >= $0.99 to capture the margin
-            if (combinedBid >= 0.99) {
-                // EXIT SIZING RULE: Half of the smallest bid, capped by what we actually own
-                const baseExitSize = Math.floor(Math.min(targetPolyBid.size, targetKalshiBid.size) / 2);
-                const approvedExitSize = Math.min(position.size, baseExitSize);
-
-                if (approvedExitSize > 0) {
-                    this.lastArbitrageTime = now;
-                    if (this.PAPER_TRADE_MODE) {
-                        this.executePaperExit(position, targetPolyBid, targetKalshiBid, approvedExitSize);
-                    }
-                }
+        if (sweep.size > 0) {
+            this.lastArbitrageTime = now;
+            if (this.PAPER_TRADE_MODE) {
+                this.executePaperExit(position, targetPolyBids, targetKalshiBids, sweep.size, sweep.polyVwap + sweep.kalshiVwap);
             }
         }
     }
 
-    private async executePaperExit(position: any, detectedPolyBid: any, detectedKalshiBid: any, approvedExitSize: number) {
+    private async executePaperExit(position: any, detectedPolyBids: any[], detectedKalshiBids: any[], approvedExitSize: number, detectedSpread: number) {
         const timeDetected = new Date().toISOString();
-        const detectedCombinedBid = (detectedPolyBid.price + detectedKalshiBid.price).toFixed(3);
-
         await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
 
-        let execPolyBid: any = null;
-        let execKalshiBid: any = null;
+        let execPolyBids: any[] = []; let execKalshiBids: any[] = [];
 
-        // Fetch fresh bids
         switch (position.type) {
-            case 'PolyYes_KalshiNo':
-                execPolyBid = this.latestPolyBook.yes?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.no?.bids?.[0]; break;
-            case 'PolyNo_KalshiYes':
-                execPolyBid = this.latestPolyBook.no?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.yes?.bids?.[0]; break;
-            case 'PolyYes_KalshiYes_Flipped':
-                execPolyBid = this.latestPolyBook.yes?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.yes?.bids?.[0]; break;
-            case 'PolyNo_KalshiNo_Flipped':
-                execPolyBid = this.latestPolyBook.no?.bids?.[0]; execKalshiBid = this.latestKalshiBook!.no?.bids?.[0]; break;
+            case 'PolyYes_KalshiNo': execPolyBids = this.latestPolyBook.yes?.bids; execKalshiBids = this.latestKalshiBook!.no?.bids; break;
+            case 'PolyNo_KalshiYes': execPolyBids = this.latestPolyBook.no?.bids; execKalshiBids = this.latestKalshiBook!.yes?.bids; break;
+            case 'PolyYes_KalshiYes_Flipped': execPolyBids = this.latestPolyBook.yes?.bids; execKalshiBids = this.latestKalshiBook!.yes?.bids; break;
+            case 'PolyNo_KalshiNo_Flipped': execPolyBids = this.latestPolyBook.no?.bids; execKalshiBids = this.latestKalshiBook!.no?.bids; break;
         }
+
+        // SWEEP FRESH BIDS AT T+1s
+        const realSweep = this.calculateSweep(execPolyBids, execKalshiBids, false, approvedExitSize);
 
         let realizedBidStr = "FAILED (BUYERS DISAPPEARED)";
         let successFlag = "❌ MISSED EXIT";
-        let filledSize = 0;
 
-        if (execPolyBid && execKalshiBid) {
-            const realizedBid = execPolyBid.price + execKalshiBid.price;
-
-            // As long as the realized exit price is safely above our entry cost, we sell!
+        if (realSweep.size > 0) {
+            // Verify our REALIZED VWAP is higher than our exact entry cost
             const entryCostPerShare = position.polyEntryPrice + position.kalshiEntryPrice;
+            const realizedBidVwap = realSweep.polyVwap + realSweep.kalshiVwap;
 
-            if (realizedBid > entryCostPerShare) {
-                realizedBidStr = realizedBid.toFixed(3);
+            if (realizedBidVwap > entryCostPerShare) {
+                realizedBidStr = realizedBidVwap.toFixed(3);
                 successFlag = "✅ PROFIT REALIZED";
 
-                // Recalculate fill size based on the fresh orderbook at T+1, capped by our approved size
-                filledSize = Math.min(approvedExitSize, execPolyBid.size, execKalshiBid.size);
-
-                if (filledSize > 0) {
-                    this.portfolio.closePosition(this.pairId, filledSize, execPolyBid.price, execKalshiBid.price);
-                }
+                this.portfolio.closePosition(this.pairId, realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap);
             } else {
-                realizedBidStr = `${realizedBid.toFixed(3)} (TOO LOW)`;
+                realizedBidStr = `${realizedBidVwap.toFixed(3)} (TOO LOW)`;
                 successFlag = "⚠️ SLIPPED (EXIT ABORTED to avoid loss)";
             }
         }
 
         const msg = `
 ==================================================
-[${timeDetected}] PAPER EXIT TRIGGERED: ${position.type}
+[${timeDetected}] PAPER EXIT: ${position.type}
 Market: ${this.pairData.polyMarket.market_question.substring(0, 80)}...
-Approved Attempt Size: ${approvedExitSize} contracts
-
---- EXIT DETECTION (T=0) | Target Revenue: ${detectedCombinedBid} ---
-Poly   : ${detectedPolyBid.size.toString().padStart(6)} buyers @ ${detectedPolyBid.price.toFixed(3)}
-Kalshi : ${detectedKalshiBid.size.toString().padStart(6)} buyers @ ${detectedKalshiBid.price.toFixed(3)}
+Detection VWAP: ${detectedSpread.toFixed(3)} | Target Size: ${approvedExitSize}
 
 --- EXECUTION (T+${this.SIMULATED_LATENCY_MS}ms) ---
-Poly   : ${execPolyBid ? execPolyBid.size.toString().padStart(6) + ' buyers @ ' + execPolyBid.price.toFixed(3) : 'BOOK EMPTY'}
-Kalshi : ${execKalshiBid ? execKalshiBid.size.toString().padStart(6) + ' buyers @ ' + execKalshiBid.price.toFixed(3) : 'BOOK EMPTY'}
-
--> REALIZED REVENUE: ${realizedBidStr}  ${successFlag}
--> FILLED SIZE: ${filledSize}
+-> REALIZED REVENUE VWAP: ${realizedBidStr}  ${successFlag}
+-> SOLD SIZE: ${realSweep.size}
 ==================================================\n`;
 
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
