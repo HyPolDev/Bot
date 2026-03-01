@@ -91,47 +91,61 @@ export class PairManager {
     // ==========================================
     // --- VWAP ENGINE ---
     // ==========================================
+    private getKalshiTakerFee(price: number, size: number): number {
+        const fee = 0.07 * size * price * (1 - price);
+        return Math.ceil(fee * 100) / 100; // Kalshi rounds the total batch up to the nearest cent
+    }
+
     private calculateSweep(
         polyLevels: any[], kalshiLevels: any[], isEntry: boolean, absoluteMax: number = Infinity
-    ): { size: number, polyVwap: number, kalshiVwap: number } {
-        if (!polyLevels || !kalshiLevels) return { size: 0, polyVwap: 0, kalshiVwap: 0 };
+    ): { size: number, polyVwap: number, kalshiVwap: number, totalKalshiFees: number } {
+        if (!polyLevels || !kalshiLevels) return { size: 0, polyVwap: 0, kalshiVwap: 0, totalKalshiFees: 0 };
 
         let pIdx = 0; let kIdx = 0;
-        // Deep clone so we can safely deduct liquidity while simulating the sweep
         const pBook = polyLevels.map(l => ({ ...l }));
         const kBook = kalshiLevels.map(l => ({ ...l }));
 
         let totalShares = 0;
         let polyCost = 0;
         let kalshiCost = 0;
+        let totalKalshiFees = 0;
 
         while (pIdx < pBook.length && kIdx < kBook.length && totalShares < absoluteMax) {
             const p = pBook[pIdx];
             const k = kBook[kIdx];
 
-            const combinedPrice = p.price + k.price;
+            // Approximate the fee for a single share to evaluate if this price level is profitable
+            const kFeePerShare = 0.07 * k.price * (1 - k.price);
 
-            // Threshold Check
-            if (isEntry && combinedPrice >= 0.97) break;
-            if (!isEntry && combinedPrice < 0.99) break;
+            // NET THRESHOLD CHECK (Including Fees)
+            if (isEntry) {
+                const netCostPerShare = p.price + k.price + kFeePerShare;
+                // If it costs more than $0.985 to enter, it's not worth it. Break the sweep.
+                if (netCostPerShare >= 0.985) break;
+            } else {
+                const netRevenuePerShare = p.price + k.price - kFeePerShare;
+                // We will evaluate strict profitability against our specific entry cost later,
+                // but we can set a hard floor here so we never sweep terrible bids.
+                if (netRevenuePerShare < 0.97) break;
+            }
 
             const overlap = Math.min(p.size, k.size);
             if (overlap <= 0) break;
 
-            // Apply Safety Halving Rule
             let safeTake = Math.floor(overlap / 2);
-            safeTake = Math.min(safeTake, absoluteMax - totalShares); // Cap by remaining need
+            safeTake = Math.min(safeTake, absoluteMax - totalShares);
 
-            if (safeTake <= 0) break; // Reached dust limits
+            if (safeTake <= 0) break;
 
             totalShares += safeTake;
             polyCost += safeTake * p.price;
             kalshiCost += safeTake * k.price;
 
-            // Consume the raw liquidity from our simulation
+            // Accumulate the real batch fee
+            totalKalshiFees += this.getKalshiTakerFee(k.price, safeTake);
+
             p.size -= overlap;
             k.size -= overlap;
-
             if (p.size <= 0) pIdx++;
             if (k.size <= 0) kIdx++;
         }
@@ -139,7 +153,8 @@ export class PairManager {
         return {
             size: totalShares,
             polyVwap: totalShares > 0 ? polyCost / totalShares : 0,
-            kalshiVwap: totalShares > 0 ? kalshiCost / totalShares : 0
+            kalshiVwap: totalShares > 0 ? kalshiCost / totalShares : 0,
+            totalKalshiFees
         };
     }
 
@@ -202,12 +217,17 @@ export class PairManager {
 
         if (realSweep.size > 0) {
             const realizedSpread = realSweep.polyVwap + realSweep.kalshiVwap;
-            realizedSpreadStr = realizedSpread.toFixed(3);
+            // You can optionally add the fee to the spread calculation to strictly log the "net spread"
+            const netSpread = realizedSpread + (realSweep.totalKalshiFees / realSweep.size);
+
+            realizedSpreadStr = `${realizedSpread.toFixed(3)} (Net: ${netSpread.toFixed(3)})`;
             successFlag = "✅ CAPTURED";
 
+            // STEP C: Pass realSweep.totalKalshiFees as the 7th argument!
             this.portfolio.openPosition(
                 this.pairId, this.pairData.polyMarket.market_question, type,
-                realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap
+                realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap,
+                realSweep.totalKalshiFees
             );
         }
 
@@ -275,15 +295,21 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
         let successFlag = "❌ MISSED EXIT";
 
         if (realSweep.size > 0) {
-            // Verify our REALIZED VWAP is higher than our exact entry cost
-            const entryCostPerShare = position.polyEntryPrice + position.kalshiEntryPrice;
-            const realizedBidVwap = realSweep.polyVwap + realSweep.kalshiVwap;
+            // Include exit fees in the realized Vwap calculation for logging
+            const exitFeePerShare = realSweep.totalKalshiFees / realSweep.size;
+            const realizedBidVwap = realSweep.polyVwap + realSweep.kalshiVwap - exitFeePerShare;
+            const entryCostPerShare = position.totalCost / position.size; // Use accurate cost basis
 
             if (realizedBidVwap > entryCostPerShare) {
                 realizedBidStr = realizedBidVwap.toFixed(3);
                 successFlag = "✅ PROFIT REALIZED";
 
-                this.portfolio.closePosition(this.pairId, realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap);
+                // STEP C: Pass realSweep.totalKalshiFees as the 5th argument!
+                this.portfolio.closePosition(
+                    this.pairId, realSweep.size,
+                    realSweep.polyVwap, realSweep.kalshiVwap,
+                    realSweep.totalKalshiFees
+                );
             } else {
                 realizedBidStr = `${realizedBidVwap.toFixed(3)} (TOO LOW)`;
                 successFlag = "⚠️ SLIPPED (EXIT ABORTED to avoid loss)";

@@ -7,8 +7,8 @@ export interface Position {
     size: number;
     polyEntryPrice: number;
     kalshiEntryPrice: number;
-    polyCost: number;           // NEW: Track exchange-specific cost
-    kalshiCost: number;         // NEW: Track exchange-specific cost
+    polyCost: number;
+    kalshiCost: number;
     totalCost: number;
     timestamp: number;
 }
@@ -25,8 +25,6 @@ export class PortfolioManager {
         this.kalshiCash = initialKalshi;
         console.log(`[Portfolio] Initialized. Poly: $${initialPoly} | Kalshi: $${initialKalshi}`);
     }
-
-    // --- Core Ledger State ---
 
     public getPolyCash(): number { return this.polyCash; }
     public getKalshiCash(): number { return this.kalshiCash; }
@@ -51,8 +49,6 @@ export class PortfolioManager {
         return invested;
     }
 
-    // --- Risk Management Lookups ---
-
     public hasOpenPosition(pairId: string): boolean { return this.openPositions.has(pairId); }
     public getPosition(pairId: string): Position | undefined { return this.openPositions.get(pairId); }
     public getPairExposure(pairId: string): number {
@@ -60,94 +56,88 @@ export class PortfolioManager {
         return position ? position.totalCost : 0;
     }
 
-    // --- Execution Handlers ---
-
     public openPosition(
-        pairId: string,
-        marketQuestion: string,
-        type: string,
-        size: number,
-        polyPrice: number,
-        kalshiPrice: number
+        pairId: string, marketQuestion: string, type: string, size: number,
+        polyPrice: number, kalshiPrice: number, kalshiFees: number
     ) {
         const polyCost = size * polyPrice;
         const kalshiCost = size * kalshiPrice;
-        const totalCost = polyCost + kalshiCost;
+        const totalCost = polyCost + kalshiCost + kalshiFees;
 
-        // Strict dual-wallet sanity check
-        if (polyCost > this.polyCash || kalshiCost > this.kalshiCash) {
-            console.error(`[Portfolio] FATAL: Insufficient funds! PolyCost: ${polyCost}, KalshiCost: ${kalshiCost}`);
+        if (polyCost > this.polyCash || (kalshiCost + kalshiFees) > this.kalshiCash) {
+            console.error(`[Portfolio] FATAL: Insufficient funds! PolyCost: ${polyCost}, KalshiReq: ${kalshiCost + kalshiFees}`);
             return;
         }
 
-        // --- THE FIX: AVERAGE INTO EXISTING POSITIONS ---
         if (this.openPositions.has(pairId)) {
             const pos = this.openPositions.get(pairId)!;
 
-            // Calculate new weighted average prices
             const newSize = pos.size + size;
             pos.polyEntryPrice = ((pos.size * pos.polyEntryPrice) + polyCost) / newSize;
             pos.kalshiEntryPrice = ((pos.size * pos.kalshiEntryPrice) + kalshiCost) / newSize;
 
-            // Update totals
             pos.size = newSize;
             pos.polyCost += polyCost;
-            pos.kalshiCost += kalshiCost;
+            pos.kalshiCost += (kalshiCost + kalshiFees); // FIX: Track the true Kalshi cost
             pos.totalCost += totalCost;
 
             this.polyCash -= polyCost;
-            this.kalshiCash -= kalshiCost;
+            this.kalshiCash -= (kalshiCost + kalshiFees); // FIX: Deduct the fee from the wallet!
 
-            // Log it as an ADD to the ledger
             this.logLedgerEvent(`ADD`, pos, 0, 0, size, totalCost);
             return;
         }
 
-        // --- CREATE NEW POSITION ---
         const newPosition: Position = {
             pairId, marketQuestion, type, size,
             polyEntryPrice: polyPrice, kalshiEntryPrice: kalshiPrice,
-            polyCost, kalshiCost, totalCost,
+            polyCost,
+            kalshiCost: kalshiCost + kalshiFees, // Include fees in the tracker
+            totalCost,
             timestamp: Date.now()
         };
 
         this.openPositions.set(pairId, newPosition);
         this.polyCash -= polyCost;
-        this.kalshiCash -= kalshiCost;
+        this.kalshiCash -= (kalshiCost + kalshiFees);
 
         this.logLedgerEvent(`OPEN`, newPosition, 0, 0, size, totalCost);
     }
 
-    public closePosition(pairId: string, exitSize: number, polyExitPrice: number, kalshiExitPrice: number) {
+    public closePosition(
+        pairId: string, exitSize: number, polyExitPrice: number, kalshiExitPrice: number, kalshiExitFees: number
+    ) {
         const position = this.openPositions.get(pairId);
         if (!position) return;
 
-        // We cannot exit more shares than we actually own
         const actualExitSize = Math.min(exitSize, position.size);
 
         const polyRevenue = actualExitSize * polyExitPrice;
-        const kalshiRevenue = actualExitSize * kalshiExitPrice;
+        const kalshiRevenue = (actualExitSize * kalshiExitPrice) - kalshiExitFees;
         const totalRevenue = polyRevenue + kalshiRevenue;
 
-        // Calculate the exact cost basis of the shares we are selling
-        const costBasis = actualExitSize * (position.polyEntryPrice + position.kalshiEntryPrice);
+        // FIX: Calculate the true cost basis using the totalCost tracker (which includes entry fees)
+        const costBasisPerShare = position.totalCost / position.size;
+        const costBasis = actualExitSize * costBasisPerShare;
+
         const pnl = totalRevenue - costBasis;
 
         this.polyCash += polyRevenue;
         this.kalshiCash += kalshiRevenue;
         this.totalRealizedPnL += pnl;
 
-        // If we sold everything, delete the position. Otherwise, update the remaining balances.
         if (actualExitSize === position.size) {
             this.openPositions.delete(pairId);
         } else {
+            const oldSize = position.size;
             position.size -= actualExitSize;
-            position.polyCost -= (actualExitSize * position.polyEntryPrice);
-            position.kalshiCost -= (actualExitSize * position.kalshiEntryPrice);
+
+            // Proportionally reduce the internal trackers
+            position.polyCost -= (actualExitSize * (position.polyCost / oldSize));
+            position.kalshiCost -= (actualExitSize * (position.kalshiCost / oldSize));
             position.totalCost -= costBasis;
         }
 
-        // Pass a cloned object to the logger so it records the exit size, not the remaining size
         const logPosition = { ...position, size: actualExitSize };
         this.logLedgerEvent(`CLOSE`, logPosition, pnl, totalRevenue);
     }
