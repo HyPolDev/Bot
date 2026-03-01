@@ -70,18 +70,40 @@ export class PortfolioManager {
         polyPrice: number,
         kalshiPrice: number
     ) {
-        if (this.openPositions.has(pairId)) return;
-
         const polyCost = size * polyPrice;
         const kalshiCost = size * kalshiPrice;
         const totalCost = polyCost + kalshiCost;
 
         // Strict dual-wallet sanity check
         if (polyCost > this.polyCash || kalshiCost > this.kalshiCash) {
-            console.error(`[Portfolio] FATAL: Insufficient funds on one of the exchanges! PolyCost: ${polyCost}, KalshiCost: ${kalshiCost}`);
+            console.error(`[Portfolio] FATAL: Insufficient funds! PolyCost: ${polyCost}, KalshiCost: ${kalshiCost}`);
             return;
         }
 
+        // --- THE FIX: AVERAGE INTO EXISTING POSITIONS ---
+        if (this.openPositions.has(pairId)) {
+            const pos = this.openPositions.get(pairId)!;
+
+            // Calculate new weighted average prices
+            const newSize = pos.size + size;
+            pos.polyEntryPrice = ((pos.size * pos.polyEntryPrice) + polyCost) / newSize;
+            pos.kalshiEntryPrice = ((pos.size * pos.kalshiEntryPrice) + kalshiCost) / newSize;
+
+            // Update totals
+            pos.size = newSize;
+            pos.polyCost += polyCost;
+            pos.kalshiCost += kalshiCost;
+            pos.totalCost += totalCost;
+
+            this.polyCash -= polyCost;
+            this.kalshiCash -= kalshiCost;
+
+            // Log it as an ADD to the ledger
+            this.logLedgerEvent(`ADD`, pos, 0, 0, size, totalCost);
+            return;
+        }
+
+        // --- CREATE NEW POSITION ---
         const newPosition: Position = {
             pairId, marketQuestion, type, size,
             polyEntryPrice: polyPrice, kalshiEntryPrice: kalshiPrice,
@@ -93,7 +115,7 @@ export class PortfolioManager {
         this.polyCash -= polyCost;
         this.kalshiCash -= kalshiCost;
 
-        this.logLedgerEvent(`OPEN`, newPosition);
+        this.logLedgerEvent(`OPEN`, newPosition, 0, 0, size, totalCost);
     }
 
     public closePosition(pairId: string, exitSize: number, polyExitPrice: number, kalshiExitPrice: number) {
@@ -130,15 +152,16 @@ export class PortfolioManager {
         this.logLedgerEvent(`CLOSE`, logPosition, pnl, totalRevenue);
     }
 
-    private logLedgerEvent(action: string, position: Position, pnl: number = 0, revenue: number = 0) {
+    private logLedgerEvent(action: string, position: Position, pnl: number = 0, revenue: number = 0, addedSize: number = 0, addedCost: number = 0) {
         const time = new Date().toISOString();
         let msg = `[${time}] LEDGER ${action}: ${position.marketQuestion.substring(0, 50)}...\n`;
-        msg += `  Size: ${position.size} | Type: ${position.type}\n`;
 
-        if (action === 'OPEN') {
-            msg += `  Cost: Poly $${position.polyCost.toFixed(2)} | Kalshi $${position.kalshiCost.toFixed(2)}\n`;
+        if (action === 'OPEN' || action === 'ADD') {
+            msg += `  Action Size: +${addedSize} | Action Cost: $${addedCost.toFixed(2)} | Type: ${position.type}\n`;
+            msg += `  Total Position Size: ${position.size} | Avg Entry: ${(position.polyEntryPrice + position.kalshiEntryPrice).toFixed(3)}\n`;
             msg += `  New Balances: Poly $${this.polyCash.toFixed(2)} | Kalshi $${this.kalshiCash.toFixed(2)}\n`;
         } else {
+            msg += `  Size: ${position.size} | Type: ${position.type}\n`;
             msg += `  Exit Revenue: $${revenue.toFixed(2)} | PnL: $${pnl.toFixed(2)}\n`;
             msg += `  Total Equity: $${this.getTotalEquity().toFixed(2)}\n`;
         }
