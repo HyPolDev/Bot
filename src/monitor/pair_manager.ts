@@ -32,6 +32,15 @@ export class PairManager {
     public latestPolyBook: { yes: any, no: any } = { yes: { bids: [], asks: [] }, no: { bids: [], asks: [] } };
     public latestKalshiBook: { yes: any, no: any } | null = null;
 
+    // --- GHOST LIQUIDITY ENGINE (For Paper Trading Realism) ---
+    // Tracks the exact shares we've "virtually" bought/sold so we don't double-dip the live orderbook
+    private ghostLiquidity: Record<string, Map<number, number>> = {
+        'poly_yes_asks': new Map(), 'poly_yes_bids': new Map(),
+        'poly_no_asks': new Map(), 'poly_no_bids': new Map(),
+        'kalshi_yes_asks': new Map(), 'kalshi_yes_bids': new Map(),
+        'kalshi_no_asks': new Map(), 'kalshi_no_bids': new Map(),
+    };
+
     private onUIUpdate: (() => void) | null = null;
 
     private lastArbitrageTime: number = 0;
@@ -88,18 +97,49 @@ export class PairManager {
         this.onUIUpdate = null;
     }
 
-    // ==========================================
-    // --- VWAP ENGINE ---
-    // ==========================================
-    private getKalshiTakerFee(price: number, size: number): number {
-        const fee = 0.07 * size * price * (1 - price);
-        return Math.ceil(fee * 100) / 100; // Kalshi rounds the total batch up to the nearest cent
+    // --- GHOST ORDERBOOK FILTER ---
+    private applyGhostLiquidity(realLevels: any[] | undefined, ghostMap: Map<number, number>): any[] {
+        if (!realLevels) return [];
+        const adjusted = [];
+
+        for (const level of realLevels) {
+            const price = level.price;
+            const realSize = level.size;
+            const consumed = ghostMap.get(price) || 0;
+
+            // Self-healing: If the real market size drops below our consumed size (meaning real traders bought it),
+            // we shrink our ghost size to match, preventing permanent negative liquidity bugs.
+            if (consumed > realSize) {
+                ghostMap.set(price, realSize);
+            }
+
+            const remainingSize = realSize - ghostMap.get(price)!;
+
+            if (remainingSize > 0) {
+                adjusted.push({ price, size: remainingSize });
+            }
+        }
+        return adjusted;
     }
 
+    private getKalshiTakerFee(price: number, size: number): number {
+        const fee = 0.07 * size * price * (1 - price);
+        return Math.ceil(fee * 100) / 100;
+    }
+
+    // ==========================================
+    // --- THE ORDERBOOK SWEEPER (VWAP ENGINE) ---
+    // ==========================================
     private calculateSweep(
         polyLevels: any[], kalshiLevels: any[], isEntry: boolean, absoluteMax: number = Infinity
-    ): { size: number, polyVwap: number, kalshiVwap: number, totalKalshiFees: number } {
-        if (!polyLevels || !kalshiLevels) return { size: 0, polyVwap: 0, kalshiVwap: 0, totalKalshiFees: 0 };
+    ): { size: number, polyVwap: number, kalshiVwap: number, totalKalshiFees: number, polyConsumed: Map<number, number>, kalshiConsumed: Map<number, number> } {
+
+        const polyConsumed = new Map<number, number>();
+        const kalshiConsumed = new Map<number, number>();
+
+        if (!polyLevels || !kalshiLevels || polyLevels.length === 0 || kalshiLevels.length === 0) {
+            return { size: 0, polyVwap: 0, kalshiVwap: 0, totalKalshiFees: 0, polyConsumed, kalshiConsumed };
+        }
 
         let pIdx = 0; let kIdx = 0;
         const pBook = polyLevels.map(l => ({ ...l }));
@@ -114,18 +154,13 @@ export class PairManager {
             const p = pBook[pIdx];
             const k = kBook[kIdx];
 
-            // Approximate the fee for a single share to evaluate if this price level is profitable
             const kFeePerShare = 0.07 * k.price * (1 - k.price);
 
-            // NET THRESHOLD CHECK (Including Fees)
             if (isEntry) {
                 const netCostPerShare = p.price + k.price + kFeePerShare;
-                // If it costs more than $0.985 to enter, it's not worth it. Break the sweep.
                 if (netCostPerShare >= 0.985) break;
             } else {
                 const netRevenuePerShare = p.price + k.price - kFeePerShare;
-                // We will evaluate strict profitability against our specific entry cost later,
-                // but we can set a hard floor here so we never sweep terrible bids.
                 if (netRevenuePerShare < 0.97) break;
             }
 
@@ -140,9 +175,11 @@ export class PairManager {
             totalShares += safeTake;
             polyCost += safeTake * p.price;
             kalshiCost += safeTake * k.price;
-
-            // Accumulate the real batch fee
             totalKalshiFees += this.getKalshiTakerFee(k.price, safeTake);
+
+            // Track exactly what price levels we consumed for the Ghost Book
+            polyConsumed.set(p.price, (polyConsumed.get(p.price) || 0) + safeTake);
+            kalshiConsumed.set(k.price, (kalshiConsumed.get(k.price) || 0) + safeTake);
 
             p.size -= overlap;
             k.size -= overlap;
@@ -154,7 +191,9 @@ export class PairManager {
             size: totalShares,
             polyVwap: totalShares > 0 ? polyCost / totalShares : 0,
             kalshiVwap: totalShares > 0 ? kalshiCost / totalShares : 0,
-            totalKalshiFees
+            totalKalshiFees,
+            polyConsumed,
+            kalshiConsumed
         };
     }
 
@@ -169,11 +208,24 @@ export class PairManager {
         const alignment = this.pairData.outcomeAlignment;
 
         if (alignment === 1) {
-            this.checkAndTriggerEntry('PolyYes_KalshiNo', this.latestPolyBook.yes?.asks, this.latestKalshiBook.no?.asks);
-            this.checkAndTriggerEntry('PolyNo_KalshiYes', this.latestPolyBook.no?.asks, this.latestKalshiBook.yes?.asks);
+            // Apply Ghost filters before checking for entry
+            this.checkAndTriggerEntry('PolyYes_KalshiNo',
+                this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
+                this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks'])
+            );
+            this.checkAndTriggerEntry('PolyNo_KalshiYes',
+                this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
+                this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks'])
+            );
         } else if (alignment === -1) {
-            this.checkAndTriggerEntry('PolyYes_KalshiYes_Flipped', this.latestPolyBook.yes?.asks, this.latestKalshiBook.yes?.asks);
-            this.checkAndTriggerEntry('PolyNo_KalshiNo_Flipped', this.latestPolyBook.no?.asks, this.latestKalshiBook.no?.asks);
+            this.checkAndTriggerEntry('PolyYes_KalshiYes_Flipped',
+                this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
+                this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks'])
+            );
+            this.checkAndTriggerEntry('PolyNo_KalshiNo_Flipped',
+                this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
+                this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks'])
+            );
         }
     }
 
@@ -181,8 +233,6 @@ export class PairManager {
         const sweep = this.calculateSweep(polyAsks, kalshiAsks, true);
 
         if (sweep.size > 0) {
-            // Trick the RiskManager: We already halved the size in the sweeper, 
-            // so we pass sweep.size * 2 into RiskManager so its internal halving returns our exact sweep size.
             const approvedSize = this.risk.calculateApprovedSize(
                 this.pairId, sweep.polyVwap, sweep.kalshiVwap, sweep.size * 2, sweep.size * 2
             );
@@ -190,26 +240,43 @@ export class PairManager {
             if (approvedSize > 0) {
                 this.lastArbitrageTime = Date.now();
                 if (this.PAPER_TRADE_MODE) {
-                    this.executePaperTrade(type, polyAsks, kalshiAsks, approvedSize, sweep.polyVwap + sweep.kalshiVwap);
+                    this.executePaperTrade(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap);
                 }
             }
         }
     }
 
-    private async executePaperTrade(type: string, detectedPolyAsks: any[], detectedKalshiAsks: any[], approvedSize: number, detectedSpread: number) {
+    private async executePaperTrade(type: string, approvedSize: number, detectedSpread: number) {
         const timeDetected = new Date().toISOString();
         await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
 
         let execPolyAsks: any[] = []; let execKalshiAsks: any[] = [];
+        let polyKey = ''; let kalshiKey = '';
 
+        // Map the correct ghost keys based on the trade type
         switch (type) {
-            case 'PolyYes_KalshiNo': execPolyAsks = this.latestPolyBook.yes?.asks; execKalshiAsks = this.latestKalshiBook!.no?.asks; break;
-            case 'PolyNo_KalshiYes': execPolyAsks = this.latestPolyBook.no?.asks; execKalshiAsks = this.latestKalshiBook!.yes?.asks; break;
-            case 'PolyYes_KalshiYes_Flipped': execPolyAsks = this.latestPolyBook.yes?.asks; execKalshiAsks = this.latestKalshiBook!.yes?.asks; break;
-            case 'PolyNo_KalshiNo_Flipped': execPolyAsks = this.latestPolyBook.no?.asks; execKalshiAsks = this.latestKalshiBook!.no?.asks; break;
+            case 'PolyYes_KalshiNo':
+                polyKey = 'poly_yes_asks'; kalshiKey = 'kalshi_no_asks';
+                execPolyAsks = this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity[polyKey]);
+                execKalshiAsks = this.applyGhostLiquidity(this.latestKalshiBook!.no?.asks, this.ghostLiquidity[kalshiKey]);
+                break;
+            case 'PolyNo_KalshiYes':
+                polyKey = 'poly_no_asks'; kalshiKey = 'kalshi_yes_asks';
+                execPolyAsks = this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity[polyKey]);
+                execKalshiAsks = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.asks, this.ghostLiquidity[kalshiKey]);
+                break;
+            case 'PolyYes_KalshiYes_Flipped':
+                polyKey = 'poly_yes_asks'; kalshiKey = 'kalshi_yes_asks';
+                execPolyAsks = this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity[polyKey]);
+                execKalshiAsks = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.asks, this.ghostLiquidity[kalshiKey]);
+                break;
+            case 'PolyNo_KalshiNo_Flipped':
+                polyKey = 'poly_no_asks'; kalshiKey = 'kalshi_no_asks';
+                execPolyAsks = this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity[polyKey]);
+                execKalshiAsks = this.applyGhostLiquidity(this.latestKalshiBook!.no?.asks, this.ghostLiquidity[kalshiKey]);
+                break;
         }
 
-        // SWEEP THE FRESH ORDERBOOK AT T+1s
         const realSweep = this.calculateSweep(execPolyAsks, execKalshiAsks, true, approvedSize);
 
         let realizedSpreadStr = "FAILED (MOVED/EMPTIED)";
@@ -217,17 +284,24 @@ export class PairManager {
 
         if (realSweep.size > 0) {
             const realizedSpread = realSweep.polyVwap + realSweep.kalshiVwap;
-            // You can optionally add the fee to the spread calculation to strictly log the "net spread"
             const netSpread = realizedSpread + (realSweep.totalKalshiFees / realSweep.size);
 
             realizedSpreadStr = `${realizedSpread.toFixed(3)} (Net: ${netSpread.toFixed(3)})`;
             successFlag = "✅ CAPTURED";
 
-            // STEP C: Pass realSweep.totalKalshiFees as the 7th argument!
+            // Add the executed shares to our Ghost Maps so we don't double dip
+            const pGhostMap = this.ghostLiquidity[polyKey];
+            for (const [price, size] of realSweep.polyConsumed.entries()) {
+                pGhostMap.set(price, (pGhostMap.get(price) || 0) + size);
+            }
+            const kGhostMap = this.ghostLiquidity[kalshiKey];
+            for (const [price, size] of realSweep.kalshiConsumed.entries()) {
+                kGhostMap.set(price, (kGhostMap.get(price) || 0) + size);
+            }
+
             this.portfolio.openPosition(
                 this.pairId, this.pairData.polyMarket.market_question, type,
-                realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap,
-                realSweep.totalKalshiFees
+                realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap, realSweep.totalKalshiFees
             );
         }
 
@@ -258,53 +332,88 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
         let targetPolyBids: any[] = []; let targetKalshiBids: any[] = [];
 
         switch (position.type) {
-            case 'PolyYes_KalshiNo': targetPolyBids = this.latestPolyBook.yes?.bids; targetKalshiBids = this.latestKalshiBook.no?.bids; break;
-            case 'PolyNo_KalshiYes': targetPolyBids = this.latestPolyBook.no?.bids; targetKalshiBids = this.latestKalshiBook.yes?.bids; break;
-            case 'PolyYes_KalshiYes_Flipped': targetPolyBids = this.latestPolyBook.yes?.bids; targetKalshiBids = this.latestKalshiBook.yes?.bids; break;
-            case 'PolyNo_KalshiNo_Flipped': targetPolyBids = this.latestPolyBook.no?.bids; targetKalshiBids = this.latestKalshiBook.no?.bids; break;
+            case 'PolyYes_KalshiNo':
+                targetPolyBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity['poly_yes_bids']);
+                targetKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
+                break;
+            case 'PolyNo_KalshiYes':
+                targetPolyBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity['poly_no_bids']);
+                targetKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
+                break;
+            case 'PolyYes_KalshiYes_Flipped':
+                targetPolyBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity['poly_yes_bids']);
+                targetKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
+                break;
+            case 'PolyNo_KalshiNo_Flipped':
+                targetPolyBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity['poly_no_bids']);
+                targetKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
+                break;
         }
 
-        // SWEEP BIDS to check if we can sell profitably
         const sweep = this.calculateSweep(targetPolyBids, targetKalshiBids, false, position.size);
 
         if (sweep.size > 0) {
             this.lastArbitrageTime = now;
             if (this.PAPER_TRADE_MODE) {
-                this.executePaperExit(position, targetPolyBids, targetKalshiBids, sweep.size, sweep.polyVwap + sweep.kalshiVwap);
+                this.executePaperExit(position, sweep.size, sweep.polyVwap + sweep.kalshiVwap);
             }
         }
     }
 
-    private async executePaperExit(position: any, detectedPolyBids: any[], detectedKalshiBids: any[], approvedExitSize: number, detectedSpread: number) {
+    private async executePaperExit(position: any, approvedExitSize: number, detectedSpread: number) {
         const timeDetected = new Date().toISOString();
         await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
 
         let execPolyBids: any[] = []; let execKalshiBids: any[] = [];
+        let polyKey = ''; let kalshiKey = '';
 
         switch (position.type) {
-            case 'PolyYes_KalshiNo': execPolyBids = this.latestPolyBook.yes?.bids; execKalshiBids = this.latestKalshiBook!.no?.bids; break;
-            case 'PolyNo_KalshiYes': execPolyBids = this.latestPolyBook.no?.bids; execKalshiBids = this.latestKalshiBook!.yes?.bids; break;
-            case 'PolyYes_KalshiYes_Flipped': execPolyBids = this.latestPolyBook.yes?.bids; execKalshiBids = this.latestKalshiBook!.yes?.bids; break;
-            case 'PolyNo_KalshiNo_Flipped': execPolyBids = this.latestPolyBook.no?.bids; execKalshiBids = this.latestKalshiBook!.no?.bids; break;
+            case 'PolyYes_KalshiNo':
+                polyKey = 'poly_yes_bids'; kalshiKey = 'kalshi_no_bids';
+                execPolyBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity[polyKey]);
+                execKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook!.no?.bids, this.ghostLiquidity[kalshiKey]);
+                break;
+            case 'PolyNo_KalshiYes':
+                polyKey = 'poly_no_bids'; kalshiKey = 'kalshi_yes_bids';
+                execPolyBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity[polyKey]);
+                execKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.bids, this.ghostLiquidity[kalshiKey]);
+                break;
+            case 'PolyYes_KalshiYes_Flipped':
+                polyKey = 'poly_yes_bids'; kalshiKey = 'kalshi_yes_bids';
+                execPolyBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity[polyKey]);
+                execKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.bids, this.ghostLiquidity[kalshiKey]);
+                break;
+            case 'PolyNo_KalshiNo_Flipped':
+                polyKey = 'poly_no_bids'; kalshiKey = 'kalshi_no_bids';
+                execPolyBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity[polyKey]);
+                execKalshiBids = this.applyGhostLiquidity(this.latestKalshiBook!.no?.bids, this.ghostLiquidity[kalshiKey]);
+                break;
         }
 
-        // SWEEP FRESH BIDS AT T+1s
         const realSweep = this.calculateSweep(execPolyBids, execKalshiBids, false, approvedExitSize);
 
         let realizedBidStr = "FAILED (BUYERS DISAPPEARED)";
         let successFlag = "❌ MISSED EXIT";
 
         if (realSweep.size > 0) {
-            // Include exit fees in the realized Vwap calculation for logging
             const exitFeePerShare = realSweep.totalKalshiFees / realSweep.size;
             const realizedBidVwap = realSweep.polyVwap + realSweep.kalshiVwap - exitFeePerShare;
-            const entryCostPerShare = position.totalCost / position.size; // Use accurate cost basis
+            const entryCostPerShare = position.totalCost / position.size;
 
             if (realizedBidVwap > entryCostPerShare) {
                 realizedBidStr = realizedBidVwap.toFixed(3);
                 successFlag = "✅ PROFIT REALIZED";
 
-                // STEP C: Pass realSweep.totalKalshiFees as the 5th argument!
+                // Add the consumed shares to the Bids Ghost Maps
+                const pGhostMap = this.ghostLiquidity[polyKey];
+                for (const [price, size] of realSweep.polyConsumed.entries()) {
+                    pGhostMap.set(price, (pGhostMap.get(price) || 0) + size);
+                }
+                const kGhostMap = this.ghostLiquidity[kalshiKey];
+                for (const [price, size] of realSweep.kalshiConsumed.entries()) {
+                    kGhostMap.set(price, (kGhostMap.get(price) || 0) + size);
+                }
+
                 this.portfolio.closePosition(
                     this.pairId, realSweep.size,
                     realSweep.polyVwap, realSweep.kalshiVwap,

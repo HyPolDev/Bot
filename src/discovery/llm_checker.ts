@@ -6,9 +6,10 @@ import dotenv from 'dotenv';
 
 dotenv.config({ override: true });
 
-// --- Rate-limit config ---
+// --- Rate-limit & Concurrency config ---
 const INTER_REQUEST_DELAY_MS = 200;
 const MAX_RETRIES = 3;
+const MAX_CONCURRENT_REQUESTS = 5;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -32,16 +33,13 @@ interface CandidatePair {
 }
 
 interface ValidatedPair extends CandidatePair {
-    outcomeAlignment: 1 | -1;
-    reason: string;
+    outcomeAlignment: 1; // Strictly 1 now
 }
 
-// NEW: Interface for logging every single LLM check
 interface LLMResponseLog {
     polyMarketId: string;
     kalshiMarketId: string;
-    alignment: 1 | 0 | -1;
-    reason: string;
+    alignment: 1 | 0;
 }
 
 // --- OpenAI Client ---
@@ -58,11 +56,11 @@ async function askLLM(
     ai: OpenAI,
     polyMarket: UnifiedMarket,
     kalshiMarket: UnifiedMarket
-): Promise<{ alignment: 1 | 0 | -1; reason: string }> {
+): Promise<{ alignment: 1 | 0 }> {
 
     const prompt = `
-You are a highly rigorous quantitative financial analyst. 
-Determine if two prediction markets are EXACTLY identical and safe for cross-exchange arbitrage.
+You are an expert quantitative arbitrage analyst. 
+Determine if two prediction markets resolve on the EXACT SAME real-world event and outcome.
 
 MARKET A (Polymarket)
   Question : "${polyMarket.market_question}"
@@ -74,18 +72,17 @@ MARKET B (Kalshi)
   Rules    : "${kalshiMarket.market_rules}"
   Outcomes : [0] = "${kalshiMarket.outcomes[0]}", [1] = "${kalshiMarket.outcomes[1]}"
 
-EVALUATION RULES (If ANY failure condition is true -> alignment is 0):
-1. Math & Thresholds: Strict mathematical boundaries must match. "> 25" is NOT the same as ">= 25" or "25+". "More than 35.5" (meaning 36) is NOT the same as "At least 35" (meaning 35).
-2. Scope & Action: "Game 1" is NOT the same as "Match". "Holding an election" is NOT the same as "Scheduling an election".
-3. Timeframes: Look AT THE TEXT in the questions/rules, NOT the metadata. "By March 31" is NOT the same as "By July 1". However, "End of Feb" is the same as "Feb 28".
-4. Binary Exhaustion: If Market A asks about "The Weeknd" and B asks about "Bad Bunny", they are NOT the same. If a 3rd party wins, both resolve to No, meaning they aren't arbitrageable.
-5. Edge Cases: If Market A says "If canceled, resolves to Other/Void", but B says "Resolves to No", they are a mismatch. 
-*TOLERANCE:* Minor differences in tie-breaker rules or resolution source wording (e.g., both use an AI leaderboard but phrase it differently) ARE ACCEPTABLE as long as the core event is the same.
+CRITICAL REJECTION RULES (If any are true, you MUST output 0):
+1. THE DERIVATIVE TRAP: If one market asks if the *odds/price/chance* of an event will reach a certain level, and the other asks if the *event itself* will happen, they are completely different instruments. Output 0.
+2. STRICT MATH DIFFERENCES: You must extract and compare the exact numerical boundaries. "50+ bps" is NOT the same as ">25bps". "More than 35.5" is NOT the same as "At least 35". If the math or numbers differ in any way, output 0.
+3. SCOPE/SUBJECT DIFFERENCES: "Win Game 2" is NOT "Win Match". "The Weeknd" is NOT "Bad Bunny". Output 0.
+
+TOLERANCE RULE (Do not overthink):
+Ignore metadata expiration dates. Ignore minor pedantic wording differences regarding tie-breakers, or platform-specific terminology for "voiding" or "canceling" a market. Do not fail a pair for administrative jargon. 
 
 ALIGNMENT MAPPING:
-If the event is perfectly identical, map Outcome 0 of Market A to Market B:
-- If A[0] (e.g., "MOUZ") corresponds exactly to the real-world outcome of B[0] (e.g., "Yes" to MOUZ winning) -> output 1.
-- If A[0] corresponds exactly to the real-world outcome of B[1] -> output -1.
+- If the core real-world event, numerical boundaries, and subjects are mathematically identical AND Market A Outcome [0] means the exact same real-world result as Market B Outcome [0] -> output 1.
+- Otherwise -> output 0.
 `;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -93,56 +90,24 @@ If the event is perfectly identical, map Outcome 0 of Market A to Market B:
             const response = await ai.chat.completions.create({
                 model: "gpt-5-nano",
                 messages: [
-                    { role: "system", content: "You are a precise prediction market analyst evaluating arbitrage pairs." },
+                    { role: "system", content: "You are a precise prediction market analyst. You only output valid JSON." },
                     { role: "user", content: prompt }
                 ],
-                temperature: 1, //gpt 5 nano requires temp 1, else model 0
+                temperature: 1,
                 response_format: {
                     type: "json_schema",
                     json_schema: {
-                        name: "strict_alignment_schema",
+                        name: "alignment_schema",
                         strict: true,
                         schema: {
                             type: "object",
                             properties: {
-                                math_and_threshold_match: {
-                                    type: "boolean",
-                                    description: "True if both markets use the exact same mathematical boundaries and numbers. False if they differ (e.g. > vs >=)."
-                                },
-                                scope_and_action_match: {
-                                    type: "boolean",
-                                    description: "True if the scope (e.g. Game 1 vs Match) and action (e.g. Scheduled vs Held) are exactly the same."
-                                },
-                                timeframe_match: {
-                                    type: "boolean",
-                                    description: "True if the event resolution deadlines stated in the text are the same."
-                                },
-                                edge_case_match: {
-                                    type: "boolean",
-                                    description: "True if there are no contradictory edge cases (like one resolving to 'Other' while the other resolves to 'No')."
-                                },
-                                alignment_analysis: {
-                                    type: "string",
-                                    description: "Briefly map Market A Outcome 0 to Market B outcomes. Does it match B[0], B[1], or neither?"
-                                },
-                                final_decision_reason: {
-                                    type: "string",
-                                    description: "A 1 sentence explanation of the final alignment."
-                                },
                                 alignment: {
                                     type: "integer",
-                                    description: "Must be 1, -1, or 0."
+                                    description: "Must be exactly 1 or 0."
                                 }
                             },
-                            required: [
-                                "math_and_threshold_match",
-                                "scope_and_action_match",
-                                "timeframe_match",
-                                "edge_case_match",
-                                "alignment_analysis",
-                                "final_decision_reason",
-                                "alignment"
-                            ],
+                            required: ["alignment"],
                             additionalProperties: false
                         }
                     }
@@ -150,38 +115,27 @@ If the event is perfectly identical, map Outcome 0 of Market A to Market B:
             });
 
             const content = response.choices[0].message.content;
-            if (!content) return { alignment: 0, reason: "API returned empty content." };
+            if (!content) return { alignment: 0 };
 
             const jsonResult = JSON.parse(content);
 
-            // HARD OVERRIDE: If the LLM flagged any logical failure but still output 1 or -1, we force it to 0.
-            const hasFailure = !jsonResult.math_and_threshold_match ||
-                !jsonResult.scope_and_action_match ||
-                !jsonResult.timeframe_match ||
-                !jsonResult.edge_case_match;
-
-            let safeAlignment: 1 | 0 | -1 = 0;
-            if (!hasFailure) {
-                if (jsonResult.alignment === 1) safeAlignment = 1;
-                if (jsonResult.alignment === -1) safeAlignment = -1;
-            }
-
-            return { alignment: safeAlignment, reason: jsonResult.final_decision_reason };
+            // Force strict 1 or 0
+            if (jsonResult.alignment === 1) return { alignment: 1 };
+            return { alignment: 0 };
 
         } catch (error: any) {
             const isRateLimit = error.status === 429;
             if (isRateLimit && attempt < MAX_RETRIES) {
                 const backoff = 5000 * attempt;
-                console.error(`\n  [Rate limit] 429. Waiting ${backoff / 1000}s...`);
                 await sleep(backoff);
             } else {
                 console.error(`\n  [OpenAI Error]:`, error.message || error);
-                return { alignment: 0, reason: `Error: ${error.message}` };
+                return { alignment: 0 };
             }
         }
     }
 
-    return { alignment: 0, reason: "Failed after max retries." };
+    return { alignment: 0 };
 }
 
 // --- Main Execution ---
@@ -189,10 +143,10 @@ async function run() {
     const DATA_DIR = path.join(process.cwd(), 'data');
     const inputFile = path.join(DATA_DIR, 'candidate_market_groups.json');
     const outputFile = path.join(DATA_DIR, 'market_pairs.json');
-    const logsFile = path.join(DATA_DIR, 'llm_responses.json'); // NEW: Audit log file
+    const logsFile = path.join(DATA_DIR, 'llm_responses.json');
 
     if (!fs.existsSync(inputFile)) {
-        console.error(`Error: ${inputFile} not found. Run the vector matcher script first.`);
+        console.error(`Error: ${inputFile} not found.`);
         return;
     }
 
@@ -204,11 +158,11 @@ async function run() {
     const ai = buildOpenAI();
 
     console.log(`\nStarting OpenAI verification for ${candidates.length} candidate pairs...`);
-    console.log('Model: gpt-5-nano | Range: 1 (aligned), -1 (flipped), 0 (no match)');
-    console.log(`Rate limit delay: ${INTER_REQUEST_DELAY_MS}ms\n`);
+    console.log(`Model: gpt-5-nano | Concurrency: ${MAX_CONCURRENT_REQUESTS} floating workers`);
+    console.log(`Mode: STRICT EXACT MATCH (1) or REJECT (0)\n`);
 
     const validatedPairs: ValidatedPair[] = [];
-    const llmLogs: LLMResponseLog[] = []; // Array to hold the full audit trail
+    const llmLogs: LLMResponseLog[] = [];
 
     const bar = new cliProgress.SingleBar({
         format: 'LLM Check |{bar}| {percentage}% || {value}/{total} pairs || Confirmed: {confirmed}',
@@ -217,49 +171,47 @@ async function run() {
 
     bar.start(candidates.length, 0, { confirmed: 0 });
 
-    for (let i = 0; i < candidates.length; i++) {
-        const pair = candidates[i];
+    let processedCount = 0;
+    const activePromises = new Set<Promise<void>>();
 
-        // Destructure the new object return type
-        const { alignment, reason } = await askLLM(ai, pair.polyMarket, pair.kalshiMarket);
+    for (const pair of candidates) {
+        const worker = askLLM(ai, pair.polyMarket, pair.kalshiMarket).then((res) => {
+            processedCount++;
 
-        // 1. Log every single response to the audit trail
-        llmLogs.push({
-            polyMarketId: pair.polyMarket.internal_id,
-            kalshiMarketId: pair.kalshiMarket.internal_id,
-            alignment,
-            reason
+            llmLogs.push({
+                polyMarketId: pair.polyMarket.internal_id,
+                kalshiMarketId: pair.kalshiMarket.internal_id,
+                alignment: res.alignment
+            });
+
+            if (res.alignment === 1) {
+                validatedPairs.push({ ...pair, outcomeAlignment: 1 });
+            }
+
+            bar.update(processedCount, { confirmed: validatedPairs.length });
+
+            fs.writeFileSync(outputFile, JSON.stringify(validatedPairs, null, 2));
+            fs.writeFileSync(logsFile, JSON.stringify(llmLogs, null, 2));
         });
 
-        // 2. Add valid pairs to the execution list (including the reason)
-        if (alignment === 1 || alignment === -1) {
-            validatedPairs.push({ ...pair, outcomeAlignment: alignment, reason });
-        }
+        activePromises.add(worker);
 
-        bar.update(i + 1, { confirmed: validatedPairs.length });
+        worker.finally(() => {
+            activePromises.delete(worker);
+        });
 
-        if (i < candidates.length - 1) {
+        if (activePromises.size >= MAX_CONCURRENT_REQUESTS) {
+            await Promise.race(activePromises);
             await sleep(INTER_REQUEST_DELAY_MS);
         }
     }
 
+    await Promise.all(activePromises);
+
     bar.stop();
 
-    // Save the final filtered pairs for the Arbitrage Engine
-    fs.writeFileSync(outputFile, JSON.stringify(validatedPairs, null, 2));
-
-    // Save the comprehensive audit trail
-    fs.writeFileSync(logsFile, JSON.stringify(llmLogs, null, 2));
-
-    const aligned = validatedPairs.filter(p => p.outcomeAlignment === 1).length;
-    const flipped = validatedPairs.filter(p => p.outcomeAlignment === -1).length;
-
     console.log(`\n✓ Validation complete.`);
-    console.log(`  Total confirmed pairs : ${validatedPairs.length}`);
-    console.log(`  Outcomes aligned (1)  : ${aligned}`);
-    console.log(`  Outcomes flipped (-1) : ${flipped}`);
-    console.log(`\n  Execution pairs saved to: ${outputFile}`);
-    console.log(`  Full audit log saved to : ${logsFile}`);
+    console.log(`  Total strict matches (1): ${validatedPairs.length}`);
 }
 
 run();
