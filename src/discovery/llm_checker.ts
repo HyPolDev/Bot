@@ -91,12 +91,12 @@ If the event is perfectly identical, map Outcome 0 of Market A to Market B:
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             const response = await ai.chat.completions.create({
-                model: "gpt-4o-mini", //gpt-5-nano
+                model: "gpt-5-nano",
                 messages: [
                     { role: "system", content: "You are a precise prediction market analyst evaluating arbitrage pairs." },
                     { role: "user", content: prompt }
                 ],
-                temperature: 0.0, // 0.0 is crucial for strict analytical logic
+                temperature: 1, //gpt 5 nano requires temp 1, else model 0
                 response_format: {
                     type: "json_schema",
                     json_schema: {
@@ -204,7 +204,7 @@ async function run() {
     const ai = buildOpenAI();
 
     console.log(`\nStarting OpenAI verification for ${candidates.length} candidate pairs...`);
-    console.log('Model: gpt-4o-mini | Range: 1 (aligned), -1 (flipped), 0 (no match)');
+    console.log('Model: gpt-5-nano | Range: 1 (aligned), -1 (flipped), 0 (no match)');
     console.log(`Rate limit delay: ${INTER_REQUEST_DELAY_MS}ms\n`);
 
     const validatedPairs: ValidatedPair[] = [];
