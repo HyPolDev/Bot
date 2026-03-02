@@ -26,7 +26,15 @@ export class KalshiClient {
 
     private sign(timestamp: number, method: string, path: string): string {
         const msgString = timestamp.toString() + method + path;
-        return crypto.sign("RSA-SHA256", Buffer.from(msgString), this.privateKey).toString('base64');
+        return crypto.sign(
+            "sha256",
+            Buffer.from(msgString),
+            {
+                key: this.privateKey,
+                padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
+                saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST
+            }
+        ).toString('base64');
     }
 
     public async placeAggressiveLimit(ticker: string, isEntry: boolean, size: number, maxVwap: number): Promise<ExecutionReceipt> {
@@ -51,12 +59,13 @@ export class KalshiClient {
                 },
                 body: JSON.stringify({
                     action: action,
+                    side: 'yes',
                     ticker: ticker,
                     count: size,
                     client_order_id: clientOrderId,
                     type: 'limit',
                     yes_price: yesPriceCents,
-                    time_in_force: 'ioc'
+                    time_in_force: 'immediate_or_cancel'
                 })
             });
 

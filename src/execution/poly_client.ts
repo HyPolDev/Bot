@@ -18,7 +18,10 @@ export class PolyClient {
     private apiPassphrase: string;
 
     constructor() {
-        const privateKey = process.env.POLY_PRIVATE_KEY || '0x00';
+        let privateKey = process.env.POLY_PRIVATE_KEY || '0x00';
+        if (!privateKey.startsWith('0x')) {
+            privateKey = '0x' + privateKey;
+        }
         this.wallet = new ethers.Wallet(privateKey);
         this.proxyWalletAddress = process.env.POLY_PROXY_ADDRESS || this.wallet.address;
 
@@ -60,19 +63,19 @@ export class PolyClient {
         const timestamp = Math.floor(Date.now() / 1000).toString();
         const message = timestamp + method + requestPath + body;
 
-        // Polymarket strictly requires Base64-URL decoding for the secret
-        const base64Secret = this.apiSecret.replace(/-/g, '+').replace(/_/g, '/');
-        const secretBuffer = Buffer.from(base64Secret, 'base64');
+        // 1. Decode the secret into a buffer (standard base64)
+        const secretBuffer = Buffer.from(this.apiSecret, 'base64');
 
-        // Generate the HMAC and strictly encode it to Base64-URL for the signature
-        let signature = crypto.createHmac('sha256', secretBuffer).update(message).digest('base64');
-        signature = signature.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        // 2. Generate the HMAC SHA256 signature (standard base64)
+        const signature = crypto.createHmac('sha256', secretBuffer).update(message).digest('base64');
 
+        // 3. EXACT HEADERS REQUIRED BY POLYMARKET (Notice the underscores!)
         return {
-            'POLY-API-KEY': this.apiKey,
-            'POLY-SIGNATURE': signature,
-            'POLY-TIMESTAMP': timestamp,
-            'POLY-PASSPHRASE': this.apiPassphrase,
+            'POLY_ADDRESS': this.proxyWalletAddress, // Must be the Proxy Wallet bound to the API Key
+            'POLY_API_KEY': this.apiKey,
+            'POLY_SIGNATURE': signature,
+            'POLY_TIMESTAMP': timestamp,
+            'POLY_PASSPHRASE': this.apiPassphrase,
             'Content-Type': 'application/json'
         };
     }
@@ -104,7 +107,14 @@ export class PolyClient {
             };
 
             // 1. Sign the Smart Contract Payload
-            const eip712Signature = await this.wallet.signTypedData(this.getDomain(), this.getTypes(), orderStruct);
+            let eip712Signature: string;
+            // ethers v6 uses signTypedData
+            if (typeof this.wallet.signTypedData === 'function') {
+                eip712Signature = await this.wallet.signTypedData(this.getDomain(), this.getTypes(), orderStruct);
+            } else {
+                // ethers v5 shim if somehow imported
+                eip712Signature = await (this.wallet as any)._signTypedData(this.getDomain(), this.getTypes(), orderStruct);
+            }
 
             const payloadBody = JSON.stringify({
                 order: orderStruct,

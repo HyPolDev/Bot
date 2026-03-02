@@ -15,7 +15,7 @@ arbitrage_opportunities.txt
 llm_mismatches.json
 portfolio_ledger.txt
 logs/
-
+agents/docs/polymarket/*
 # Preserve /data folder
 /data/*
 !/data/.gitkeep
