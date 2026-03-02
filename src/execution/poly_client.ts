@@ -1,17 +1,30 @@
 import { ethers } from 'ethers';
+import * as crypto from 'crypto';
 import { ExecutionReceipt } from './types.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 export class PolyClient {
-    private readonly baseUrl: string = 'https://gamma-api.polymarket.com';
+    private readonly baseUrl: string = 'https://clob.polymarket.com';
     private wallet: ethers.Wallet;
     private proxyWalletAddress: string;
-    private chainId: number = 137; // Polygon Mainnet
-    private exchangeContract: string = '0x4bFb41d5B3570DeFd03C39a9A4D8fE6bD8FCBce3'; // Standard CTF Exchange
+    private chainId: number = 137;
+    private exchangeContract: string = '0x4bfb41d5b3570defd03c39a9a4d8fe6bd8fcbce3';
+
+    // API Keys for Server Auth
+    private apiKey: string;
+    private apiSecret: string;
+    private apiPassphrase: string;
 
     constructor() {
-        const privateKey = process.env.POLY_PRIVATE_KEY || '0x0000000000000000000000000000000000000000000000000000000000000000';
+        const privateKey = process.env.POLY_PRIVATE_KEY || '0x00';
         this.wallet = new ethers.Wallet(privateKey);
         this.proxyWalletAddress = process.env.POLY_PROXY_ADDRESS || this.wallet.address;
+
+        this.apiKey = process.env.POLY_API_KEY || '';
+        this.apiSecret = process.env.POLY_API_SECRET || '';
+        this.apiPassphrase = process.env.POLY_PASSPHRASE || '';
     }
 
     private getDomain() {
@@ -24,7 +37,6 @@ export class PolyClient {
     }
 
     private getTypes() {
-        // Standard Polymarket CLOB Order Types
         return {
             Order: [
                 { name: "salt", type: "uint256" },
@@ -43,34 +55,38 @@ export class PolyClient {
         };
     }
 
+    // Generates the HMAC signature required by the CLOB firewall
+    private buildAuthHeaders(method: string, requestPath: string, body: string): Record<string, string> {
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const message = timestamp + method + requestPath + body;
+
+        // Polymarket strictly requires Base64-URL decoding for the secret
+        const base64Secret = this.apiSecret.replace(/-/g, '+').replace(/_/g, '/');
+        const secretBuffer = Buffer.from(base64Secret, 'base64');
+
+        // Generate the HMAC and strictly encode it to Base64-URL for the signature
+        let signature = crypto.createHmac('sha256', secretBuffer).update(message).digest('base64');
+        signature = signature.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+        return {
+            'POLY-API-KEY': this.apiKey,
+            'POLY-SIGNATURE': signature,
+            'POLY-TIMESTAMP': timestamp,
+            'POLY-PASSPHRASE': this.apiPassphrase,
+            'Content-Type': 'application/json'
+        };
+    }
+
     public async placeAggressiveLimit(tokenId: string, isEntry: boolean, size: number, maxVwap: number): Promise<ExecutionReceipt> {
         try {
-            // Usually Polymarket represents shares and collateral in 6 decimals (USDC)
-            // But if size is standard integer shares, we scale it.
-            // Example: size = 10 (10 shares).
-            // This implementation assumes Polymarket's Gamma API wrapper accepts these simplified fields,
-            // while requiring an EIP-712 signature over a standard order or specific payload.
-            // To ensure it works out of the box with the user's explicit payload:
-
-            const payload = {
-                token_id: tokenId,
-                side: isEntry ? 'BUY' : 'SELL',
-                size: size,
-                price: maxVwap,
-                order_type: 'FOK'
-            };
-
-            // Generating a standard EIP-712 signature over the Polymarket CLOB Order 
-            // We map the simplified fields to the exact CLOB Order struct to be signed.
             const sideInt = isEntry ? 0 : 1; // 0 = BUY, 1 = SELL
             const salt = Math.floor(Math.random() * 1e12).toString();
 
-            // Scaled values (assuming 6 decimals USDC)
             const sizeScaled = BigInt(size * 1e6);
             const collateralScaled = BigInt(Math.floor(size * maxVwap * 1e6));
 
-            const makerAmount = isEntry ? collateralScaled : sizeScaled;
-            const takerAmount = isEntry ? sizeScaled : collateralScaled;
+            const makerAmount = isEntry ? collateralScaled.toString() : sizeScaled.toString();
+            const takerAmount = isEntry ? sizeScaled.toString() : collateralScaled.toString();
 
             const orderStruct = {
                 salt: salt,
@@ -80,30 +96,31 @@ export class PolyClient {
                 tokenId: tokenId,
                 makerAmount: makerAmount,
                 takerAmount: takerAmount,
-                expiration: 0, // FOK orders execute immediately
+                expiration: 0,
                 nonce: 0,
                 feeRateBps: 0,
                 side: sideInt,
-                signatureType: 0 // EOA signature
+                signatureType: 0
             };
 
-            const signature = await this.wallet.signTypedData(this.getDomain(), this.getTypes(), orderStruct);
+            // 1. Sign the Smart Contract Payload
+            const eip712Signature = await this.wallet.signTypedData(this.getDomain(), this.getTypes(), orderStruct);
 
-            // Send to Gamma API (assuming standard /orders endpoint for the proxy)
-            const url = `${this.baseUrl}/orders`;
-            const response = await fetch(url, {
+            const payloadBody = JSON.stringify({
+                order: orderStruct,
+                owner: this.proxyWalletAddress,
+                signature: eip712Signature,
+                orderType: 'FOK'
+            });
+
+            // 2. Sign the Server API Headers
+            const endpoint = '/order';
+            const headers = this.buildAuthHeaders('POST', endpoint, payloadBody);
+
+            const response = await fetch(`${this.baseUrl}${endpoint}`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    // Send the simplified payload requested by the spec
-                    ...payload,
-                    // Send the structured data & signature just in case it's required in body
-                    order: orderStruct,
-                    owner: this.proxyWalletAddress,
-                    signature: signature
-                })
+                headers: headers,
+                body: payloadBody
             });
 
             if (!response.ok) {
@@ -138,7 +155,7 @@ export class PolyClient {
                     exchange: 'Polymarket',
                     status: 'failed',
                     orderId: orderId,
-                    error: `Unhandled status: ${data.status}`
+                    error: `Unhandled status: ${JSON.stringify(data)}`
                 };
             }
         } catch (error: any) {

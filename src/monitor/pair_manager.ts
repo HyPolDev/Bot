@@ -2,6 +2,7 @@ import { PolymarketWS } from '../utils/exchanges/polymarket_ws.js';
 import { KalshiWS } from '../utils/exchanges/kalshi_ws.js';
 import { PortfolioManager } from '../portfolio/portfolio_manager.js';
 import { RiskManager } from '../portfolio/risk_manager.js';
+import { LiveEngine } from '../execution/live_engine.js'; // <-- 1. IMPORT ADDED
 import fs from 'fs';
 
 export interface UnifiedMarket {
@@ -28,12 +29,15 @@ export class PairManager {
 
     private portfolio: PortfolioManager;
     private risk: RiskManager;
+    private liveEngine: LiveEngine; // <-- 2. ENGINE ADDED
+
+    // <-- 3. TOKEN IDs ADDED (Required for Polymarket live orders)
+    private polyYesTokenId: string = '';
+    private polyNoTokenId: string = '';
 
     public latestPolyBook: { yes: any, no: any } = { yes: { bids: [], asks: [] }, no: { bids: [], asks: [] } };
     public latestKalshiBook: { yes: any, no: any } | null = null;
 
-    // --- GHOST LIQUIDITY ENGINE (For Paper Trading Realism) ---
-    // Tracks the exact shares we've "virtually" bought/sold so we don't double-dip the live orderbook
     private ghostLiquidity: Record<string, Map<number, number>> = {
         'poly_yes_asks': new Map(), 'poly_yes_bids': new Map(),
         'poly_no_asks': new Map(), 'poly_no_bids': new Map(),
@@ -49,11 +53,13 @@ export class PairManager {
     private readonly PAPER_TRADE_MODE: boolean = true;
     private readonly SIMULATED_LATENCY_MS: number = 1000;
 
-    constructor(pair: CandidatePair, portfolio: PortfolioManager, risk: RiskManager) {
+    // <-- 4. CONSTRUCTOR UPDATED TO ACCEPT LIVE ENGINE
+    constructor(pair: CandidatePair, portfolio: PortfolioManager, risk: RiskManager, liveEngine: LiveEngine) {
         this.pairData = pair;
         this.pairId = `${pair.polyMarket.internal_id}_${pair.kalshiMarket.internal_id}`;
         this.portfolio = portfolio;
         this.risk = risk;
+        this.liveEngine = liveEngine;
     }
 
     public async start() {
@@ -63,6 +69,10 @@ export class PairManager {
 
             const polyMarketData = await polyResponse.json();
             const clobTokenIds = JSON.parse(polyMarketData.clobTokenIds);
+
+            // <-- 5. SAVE TOKEN IDs
+            this.polyYesTokenId = clobTokenIds[0];
+            this.polyNoTokenId = clobTokenIds[1];
 
             this.polyWsClient = new PolymarketWS(clobTokenIds[0], clobTokenIds[1], (source, updatedSide) => {
                 if (updatedSide.isYes) this.latestPolyBook.yes = { bids: updatedSide.bids, asks: updatedSide.asks };
@@ -97,7 +107,6 @@ export class PairManager {
         this.onUIUpdate = null;
     }
 
-    // --- GHOST ORDERBOOK FILTER ---
     private applyGhostLiquidity(realLevels: any[] | undefined, ghostMap: Map<number, number>): any[] {
         if (!realLevels) return [];
         const adjusted = [];
@@ -107,8 +116,6 @@ export class PairManager {
             const realSize = level.size;
             const consumed = ghostMap.get(price) || 0;
 
-            // Self-healing: If the real market size drops below our consumed size (meaning real traders bought it),
-            // we shrink our ghost size to match, preventing permanent negative liquidity bugs.
             if (consumed > realSize) {
                 ghostMap.set(price, realSize);
             }
@@ -127,9 +134,6 @@ export class PairManager {
         return Math.ceil(fee * 100) / 100;
     }
 
-    // ==========================================
-    // --- THE ORDERBOOK SWEEPER (VWAP ENGINE) ---
-    // ==========================================
     private calculateSweep(
         polyLevels: any[], kalshiLevels: any[], isEntry: boolean, absoluteMax: number = Infinity
     ): { size: number, polyVwap: number, kalshiVwap: number, totalKalshiFees: number, polyConsumed: Map<number, number>, kalshiConsumed: Map<number, number> } {
@@ -177,7 +181,6 @@ export class PairManager {
             kalshiCost += safeTake * k.price;
             totalKalshiFees += this.getKalshiTakerFee(k.price, safeTake);
 
-            // Track exactly what price levels we consumed for the Ghost Book
             polyConsumed.set(p.price, (polyConsumed.get(p.price) || 0) + safeTake);
             kalshiConsumed.set(k.price, (kalshiConsumed.get(k.price) || 0) + safeTake);
 
@@ -197,9 +200,6 @@ export class PairManager {
         };
     }
 
-    // ==========================================
-    // --- ENTRY LOGIC ---
-    // ==========================================
     private evaluateEntry() {
         if (!this.latestKalshiBook) return;
         const now = Date.now();
@@ -208,7 +208,6 @@ export class PairManager {
         const alignment = this.pairData.outcomeAlignment;
 
         if (alignment === 1) {
-            // Apply Ghost filters before checking for entry
             this.checkAndTriggerEntry('PolyYes_KalshiNo',
                 this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
                 this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks'])
@@ -241,19 +240,33 @@ export class PairManager {
                 this.lastArbitrageTime = Date.now();
                 if (this.PAPER_TRADE_MODE) {
                     this.executePaperTrade(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap);
+                } else {
+                    // <-- 6. LIVE ENTRY ROUTING
+                    const polyAssetId = type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
+
+                    this.liveEngine.executeOrder({
+                        pairId: this.pairId,
+                        tradeType: type,
+                        targetSize: approvedSize,
+                        polyAssetId: polyAssetId,
+                        kalshiTicker: this.pairData.kalshiMarket.internal_id,
+                        polyMaxVwap: sweep.polyVwap,
+                        kalshiMaxVwap: sweep.kalshiVwap,
+                        isEntry: true
+                    });
                 }
             }
         }
     }
 
     private async executePaperTrade(type: string, approvedSize: number, detectedSpread: number) {
+        // [Existing paper trade logic remains identical]
         const timeDetected = new Date().toISOString();
         await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
 
         let execPolyAsks: any[] = []; let execKalshiAsks: any[] = [];
         let polyKey = ''; let kalshiKey = '';
 
-        // Map the correct ghost keys based on the trade type
         switch (type) {
             case 'PolyYes_KalshiNo':
                 polyKey = 'poly_yes_asks'; kalshiKey = 'kalshi_no_asks';
@@ -289,7 +302,6 @@ export class PairManager {
             realizedSpreadStr = `${realizedSpread.toFixed(3)} (Net: ${netSpread.toFixed(3)})`;
             successFlag = "✅ CAPTURED";
 
-            // Add the executed shares to our Ghost Maps so we don't double dip
             const pGhostMap = this.ghostLiquidity[polyKey];
             for (const [price, size] of realSweep.polyConsumed.entries()) {
                 pGhostMap.set(price, (pGhostMap.get(price) || 0) + size);
@@ -319,9 +331,6 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
 
-    // ==========================================
-    // --- EXIT LOGIC ---
-    // ==========================================
     private evaluateExit() {
         const position = this.portfolio.getPosition(this.pairId);
         if (!position || !this.latestKalshiBook) return;
@@ -356,11 +365,26 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
             this.lastArbitrageTime = now;
             if (this.PAPER_TRADE_MODE) {
                 this.executePaperExit(position, sweep.size, sweep.polyVwap + sweep.kalshiVwap);
+            } else {
+                // <-- 7. LIVE EXIT ROUTING
+                const polyAssetId = position.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
+
+                this.liveEngine.executeOrder({
+                    pairId: this.pairId,
+                    tradeType: position.type,
+                    targetSize: sweep.size,
+                    polyAssetId: polyAssetId,
+                    kalshiTicker: this.pairData.kalshiMarket.internal_id,
+                    polyMaxVwap: sweep.polyVwap,
+                    kalshiMaxVwap: sweep.kalshiVwap,
+                    isEntry: false
+                });
             }
         }
     }
 
     private async executePaperExit(position: any, approvedExitSize: number, detectedSpread: number) {
+        // [Existing paper exit logic remains identical]
         const timeDetected = new Date().toISOString();
         await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
 
@@ -404,7 +428,6 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
                 realizedBidStr = realizedBidVwap.toFixed(3);
                 successFlag = "✅ PROFIT REALIZED";
 
-                // Add the consumed shares to the Bids Ghost Maps
                 const pGhostMap = this.ghostLiquidity[polyKey];
                 for (const [price, size] of realSweep.polyConsumed.entries()) {
                     pGhostMap.set(price, (pGhostMap.get(price) || 0) + size);

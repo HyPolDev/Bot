@@ -1,6 +1,9 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { ExecutionReceipt } from './types.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 export class KalshiClient {
     private readonly baseUrl: string = 'https://api.elections.kalshi.com/trade-api/v2';
@@ -8,15 +11,15 @@ export class KalshiClient {
     private privateKey: string = '';
 
     constructor() {
-        this.keyId = process.env.KALSHI_KEY_ID || '';
+        this.keyId = process.env.KALSHI_API_KEY || '';
 
         if (process.env.KALSHI_PRIVATE_KEY) {
             this.privateKey = process.env.KALSHI_PRIVATE_KEY;
-        } else if (process.env.KALSHI_PRIVATE_KEY_PATH) {
+        } else if (process.env.KALSHI_KEY_PATH) {
             try {
-                this.privateKey = fs.readFileSync(process.env.KALSHI_PRIVATE_KEY_PATH, 'utf-8');
+                this.privateKey = fs.readFileSync(process.env.KALSHI_KEY_PATH, 'utf-8');
             } catch (e) {
-                console.warn("Could not read Kalshi Private Key from path:", process.env.KALSHI_PRIVATE_KEY_PATH);
+                console.warn("Could not read Kalshi Private Key from path:", process.env.KALSHI_KEY_PATH);
             }
         }
     }
@@ -31,12 +34,14 @@ export class KalshiClient {
         const action = isEntry ? 'buy' : 'sell';
         const yesPriceCents = Math.floor(maxVwap * 100);
         const clientOrderId = crypto.randomUUID();
-        const path = '/portfolio/orders';
+
+        const endpoint = '/portfolio/orders';
+        const signaturePath = `/trade-api/v2${endpoint}`;
 
         try {
-            const signature = this.sign(timestamp, 'POST', path);
+            const signature = this.sign(timestamp, 'POST', signaturePath);
 
-            const response = await fetch(`${this.baseUrl}${path}`, {
+            const response = await fetch(`${this.baseUrl}${endpoint}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
