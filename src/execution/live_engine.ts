@@ -1,0 +1,147 @@
+import { ExecutionPayload, ExecutionReceipt } from './types.js';
+import { PolyClient } from './poly_client.js';
+import { KalshiClient } from './kalshi_client.js';
+
+// Assume PortfolioManager can be injected or imported. Using basic logging for now.
+// import { PortfolioManager } from '../portfolio/portfolio_manager.js';
+
+export class LiveEngine {
+    private polyClient: PolyClient;
+    private kalshiClient: KalshiClient;
+    private portfolioManager: any; // Injected instance
+
+    constructor(portfolioManager: any) {
+        this.polyClient = new PolyClient();
+        this.kalshiClient = new KalshiClient();
+        this.portfolioManager = portfolioManager;
+    }
+
+    public async executeOrder(payload: ExecutionPayload): Promise<void> {
+        console.log(`[LIVE ENGINE] Firing concurrent FOK/IOC orders for pair ${payload.pairId}`);
+
+        try {
+            const [polyReceipt, kalshiReceipt] = await Promise.all([
+                this.polyClient.placeAggressiveLimit(payload.polyAssetId, payload.isEntry, payload.targetSize, payload.polyMaxVwap),
+                this.kalshiClient.placeAggressiveLimit(payload.kalshiTicker, payload.isEntry, payload.targetSize, payload.kalshiMaxVwap)
+            ]);
+
+            await this.reconcile(payload, polyReceipt, kalshiReceipt);
+        } catch (error) {
+            console.error(`[LIVE ENGINE] Unhandled exception during concurrent execution:`, error);
+        }
+    }
+
+    private async reconcile(payload: ExecutionPayload, polyReceipt: ExecutionReceipt, kalshiReceipt: ExecutionReceipt): Promise<void> {
+        console.log(`[LIVE ENGINE] Reconciliation Phase. Poly: ${polyReceipt.status}, Kalshi: ${kalshiReceipt.status}`);
+
+        const polyFilled: boolean = polyReceipt.status === 'filled';
+        const kalshiFilled: boolean = kalshiReceipt.status === 'filled';
+
+        if (polyFilled && kalshiFilled) {
+            // Success
+            console.log(`[LIVE ENGINE] Success! Both legs filled.`);
+
+            const polySize = polyReceipt.executedSize || payload.targetSize;
+            const polyPrice = polyReceipt.executedPrice || payload.polyMaxVwap;
+
+            const kalshiSize = kalshiReceipt.executedSize || payload.targetSize;
+            const kalshiPrice = kalshiReceipt.executedPrice || payload.kalshiMaxVwap;
+
+            // Apply Kalshi Taker fee formula
+            const kalshiFeeAmount = this.calculateKalshiTakerFee(kalshiPrice, kalshiSize);
+            const totalKalshiCost = (kalshiSize * kalshiPrice) + kalshiFeeAmount;
+
+            console.log(`[LIVE ENGINE] Poly Executed: ${polySize} shares @ $${polyPrice}`);
+            console.log(`[LIVE ENGINE] Kalshi Executed: ${kalshiSize} shares @ $${kalshiPrice} (Fee: $${kalshiFeeAmount})`);
+
+            if (this.portfolioManager) {
+                // The final executed size is the bottleneck of the two exchanges
+                const finalSize = Math.min(polySize, kalshiSize);
+
+                if (payload.isEntry) {
+                    // It's a BUY order, so we OPEN or ADD to the position
+                    this.portfolioManager.openPosition(
+                        payload.pairId,
+                        `${payload.polyAssetId} / ${payload.kalshiTicker}`, // Fallback market name
+                        payload.tradeType,
+                        finalSize,
+                        polyPrice,
+                        kalshiPrice,
+                        kalshiFeeAmount
+                    );
+                } else {
+                    // It's a SELL order, so we CLOSE the position to realize profits
+                    this.portfolioManager.closePosition(
+                        payload.pairId,
+                        finalSize,
+                        polyPrice,
+                        kalshiPrice,
+                        kalshiFeeAmount
+                    );
+                }
+            }
+        } else if (!polyFilled && !kalshiFilled) {
+            // Total Miss
+            console.warn(`[LIVE ENGINE] Missed Spread. Both orders canceled or failed.`);
+            if (polyReceipt.error) console.debug(`Poly Error:`, polyReceipt.error);
+            if (kalshiReceipt.error) console.debug(`Kalshi Error:`, kalshiReceipt.error);
+        } else {
+            // The Orphaned Leg
+            console.error(`[LIVE ENGINE] [CRITICAL] ORPHAN_HEDGE_EVENT DETECTED! One leg filled, the other failed!`);
+
+            if (polyFilled) {
+                console.error(`[LIVE ENGINE] Polymarket filled, Kalshi failed. Triggering Poly Emergency Hedge...`);
+                // Asynchronously sell the filled leg back to the market at best bid
+                // Using 0.01 as a dummy "best bid" or market order equivalent for IOC
+                this.triggerEmergencyHedge('Polymarket', payload.polyAssetId, payload.isEntry, polyReceipt.executedSize || payload.targetSize);
+            }
+
+            if (kalshiFilled) {
+                console.error(`[LIVE ENGINE] Kalshi filled, Polymarket failed. Triggering Kalshi Emergency Hedge...`);
+                this.triggerEmergencyHedge('Kalshi', payload.kalshiTicker, payload.isEntry, kalshiReceipt.executedSize || payload.targetSize);
+            }
+        }
+    }
+
+    private calculateKalshiTakerFee(executedPrice: number, size: number): number {
+        // Kalshi Dynamic Taker Fee Calculation (Post-execution)
+        // Let's assume price is in dollars (e.g. 0.52). Convert to cents for calculation.
+        const priceCents = Math.round(executedPrice * 100);
+
+        let feePerContractCents = 0;
+        // Typically, Kalshi taker limit fees are around ~7% of the smaller probability (price or 100-price)
+        // or a flat minimal fee. This varies slightly with new tiers. 
+        // Using a standard placeholder calculation:
+        const minProb = Math.min(priceCents, 100 - priceCents);
+        feePerContractCents = Math.floor(minProb * 0.07); // ~7% of the implied probability 
+
+        // Cap or specifics can be added here
+
+        const totalFeeCents = feePerContractCents * size;
+        return totalFeeCents / 100; // Return in dollars
+    }
+
+    private triggerEmergencyHedge(exchange: 'Polymarket' | 'Kalshi', assetIdentifier: string, originalEntry: boolean, size: number) {
+        // We trigger asynchronously without awaiting so the main engine doesn't block
+        setImmediate(async () => {
+            try {
+                // To flatten delta, we reverse the direction
+                const hedgeDirection = !originalEntry; // if we bought, we now sell
+                // Try to offload immediately (fire a very aggressive limit that acts as a market order)
+                if (exchange === 'Polymarket') {
+                    // E.g., min valid price to ensure execution
+                    const dumpPrice = hedgeDirection ? 0.01 : 0.99;
+                    console.log(`[EMERGENCY ROUTINE] Selling ${size} shares on Polymarket for ${assetIdentifier}`);
+                    await this.polyClient.placeAggressiveLimit(assetIdentifier, hedgeDirection, size, dumpPrice);
+                } else if (exchange === 'Kalshi') {
+                    const dumpPriceCents = hedgeDirection ? 0.01 : 0.99;
+                    console.log(`[EMERGENCY ROUTINE] Selling ${size} shares on Kalshi for ${assetIdentifier}`);
+                    await this.kalshiClient.placeAggressiveLimit(assetIdentifier, hedgeDirection, size, dumpPriceCents);
+                }
+                console.log(`[EMERGENCY ROUTINE] Hedge execution request sent for ${exchange}.`);
+            } catch (err) {
+                console.error(`[EMERGENCY ROUTINE] FAILED to flat Delta on ${exchange}! Position is unhedged!`, err);
+            }
+        });
+    }
+}
