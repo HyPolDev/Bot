@@ -8,6 +8,7 @@
   "main": "index.ts",
   "scripts": {
     "test": "npx tsx src/index.ts",
+    "test-execution": "npx tsx src/execution/test_execution.ts",
     "setup": "chmod +x setup/llm_setup.sh && ./setup/llm_setup.sh",
     "test-discovery": "chmod +x ./src/test/test_discovery.sh && ./src/test/test_discovery.sh"
   },

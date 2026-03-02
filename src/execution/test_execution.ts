@@ -21,11 +21,11 @@ async function runTests() {
     const kalshiClient = new KalshiClient();
 
     // We use $0.01 as a guaranteed-to-fail limit price.
-    const TEST_SIZE = 1;
+    const TEST_SIZE = 600;
     const TEST_PRICE_VWAP = 0.01;
 
     console.log(`[TEST 1] Pinging Kalshi REST API...`);
-    console.log(`  -> Attempting to buy 1 contract of ${TEST_KALSHI_TICKER} @ $0.01`);
+    console.log(`  -> Attempting to buy 500 contract of ${TEST_KALSHI_TICKER} @ $0.01`);
 
     const kalshiResult = await kalshiClient.placeAggressiveLimit(TEST_KALSHI_TICKER, true, TEST_SIZE, TEST_PRICE_VWAP);
     console.log(`\nKalshi Response:`);
@@ -40,7 +40,7 @@ async function runTests() {
     console.log(`------------------------------------------------------\n`);
 
     console.log(`[TEST 2] Pinging Polymarket Gamma API (CLOB)...`);
-    console.log(`  -> Attempting to buy 1 contract of Token ${TEST_POLY_TOKEN_ID} @ $0.01`);
+    console.log(`  -> Attempting to buy 500 contract of Token ${TEST_POLY_TOKEN_ID} @ $0.01`);
 
     const polyResult = await polyClient.placeAggressiveLimit(TEST_POLY_TOKEN_ID, true, TEST_SIZE, TEST_PRICE_VWAP);
     console.log(`\nPolymarket Response:`);
