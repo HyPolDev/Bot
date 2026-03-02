@@ -63,15 +63,15 @@ export class PolyClient {
         const timestamp = Math.floor(Date.now() / 1000).toString();
         const message = timestamp + method + requestPath + body;
 
-        // 1. Decode the secret into a buffer (standard base64)
+        // 1. Standard base64 decode of the secret
         const secretBuffer = Buffer.from(this.apiSecret, 'base64');
 
-        // 2. Generate the HMAC SHA256 signature (standard base64)
+        // 2. Standard base64 HMAC signature
         const signature = crypto.createHmac('sha256', secretBuffer).update(message).digest('base64');
 
-        // 3. EXACT HEADERS REQUIRED BY POLYMARKET (Notice the underscores!)
+        // 3. EXACT HEADERS REQUIRED BY POLYMARKET
         return {
-            'POLY_ADDRESS': this.proxyWalletAddress, // Must be the Proxy Wallet bound to the API Key
+            'POLY_ADDRESS': this.wallet.address,   // CRITICAL: The firewall needs the Wallet, not the Proxy
             'POLY_API_KEY': this.apiKey,
             'POLY_SIGNATURE': signature,
             'POLY_TIMESTAMP': timestamp,
@@ -106,15 +106,8 @@ export class PolyClient {
                 signatureType: 0
             };
 
-            // 1. Sign the Smart Contract Payload
-            let eip712Signature: string;
-            // ethers v6 uses signTypedData
-            if (typeof this.wallet.signTypedData === 'function') {
-                eip712Signature = await this.wallet.signTypedData(this.getDomain(), this.getTypes(), orderStruct);
-            } else {
-                // ethers v5 shim if somehow imported
-                eip712Signature = await (this.wallet as any)._signTypedData(this.getDomain(), this.getTypes(), orderStruct);
-            }
+            // 1. Sign the Smart Contract Payload (Ethers v5 method)
+            const eip712Signature = await this.wallet._signTypedData(this.getDomain(), this.getTypes(), orderStruct);
 
             const payloadBody = JSON.stringify({
                 order: orderStruct,
@@ -132,6 +125,7 @@ export class PolyClient {
                 headers: headers,
                 body: payloadBody
             });
+            console.log(response);
 
             if (!response.ok) {
                 const errorStr = await response.text();
