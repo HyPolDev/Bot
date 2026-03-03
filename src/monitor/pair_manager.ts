@@ -50,7 +50,7 @@ export class PairManager {
     private lastArbitrageTime: number = 0;
     private readonly ARBITRAGE_COOLDOWN_MS: number = 10000;
 
-    private readonly PAPER_TRADE_MODE: boolean = true;
+    private readonly PAPER_TRADE_MODE: boolean;
     private readonly SIMULATED_LATENCY_MS: number = 1000;
 
     // <-- 4. CONSTRUCTOR UPDATED TO ACCEPT LIVE ENGINE
@@ -60,6 +60,7 @@ export class PairManager {
         this.portfolio = portfolio;
         this.risk = risk;
         this.liveEngine = liveEngine;
+        this.PAPER_TRADE_MODE = process.env.PAPER_TRADE !== "false";
     }
 
     public async start() {
@@ -243,6 +244,7 @@ export class PairManager {
                 } else {
                     // <-- 6. LIVE ENTRY ROUTING
                     const polyAssetId = type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
+                    const kalshiSide = type.includes('KalshiYes') ? 'yes' : 'no';
 
                     this.liveEngine.executeOrder({
                         pairId: this.pairId,
@@ -250,6 +252,7 @@ export class PairManager {
                         targetSize: approvedSize,
                         polyAssetId: polyAssetId,
                         kalshiTicker: this.pairData.kalshiMarket.internal_id,
+                        kalshiSide: kalshiSide as 'yes' | 'no',
                         polyMaxVwap: sweep.polyVwap,
                         kalshiMaxVwap: sweep.kalshiVwap,
                         isEntry: true
@@ -368,6 +371,7 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
             } else {
                 // <-- 7. LIVE EXIT ROUTING
                 const polyAssetId = position.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
+                const kalshiSide = position.type.includes('KalshiYes') ? 'yes' : 'no';
 
                 this.liveEngine.executeOrder({
                     pairId: this.pairId,
@@ -375,6 +379,7 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
                     targetSize: sweep.size,
                     polyAssetId: polyAssetId,
                     kalshiTicker: this.pairData.kalshiMarket.internal_id,
+                    kalshiSide: kalshiSide as 'yes' | 'no',
                     polyMaxVwap: sweep.polyVwap,
                     kalshiMaxVwap: sweep.kalshiVwap,
                     isEntry: false

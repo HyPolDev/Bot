@@ -9,20 +9,27 @@ export class LiveEngine {
     private polyClient: PolyClient;
     private kalshiClient: KalshiClient;
     private portfolioManager: any; // Injected instance
+    private maxPositionSize: number;
 
     constructor(portfolioManager: any) {
         this.polyClient = new PolyClient();
         this.kalshiClient = new KalshiClient();
         this.portfolioManager = portfolioManager;
+        this.maxPositionSize = parseInt(process.env.MAX_POSITION_SIZE || '50', 10);
     }
 
     public async executeOrder(payload: ExecutionPayload): Promise<void> {
+        if (payload.targetSize > this.maxPositionSize) {
+            console.warn(`[LIVE ENGINE] ⚠️ SAFETY LIMIT: Reducing target size from ${payload.targetSize} to ${this.maxPositionSize}`);
+            payload.targetSize = this.maxPositionSize;
+        }
+
         console.log(`[LIVE ENGINE] Firing concurrent FOK/IOC orders for pair ${payload.pairId}`);
 
         try {
             const [polyReceipt, kalshiReceipt] = await Promise.all([
                 this.polyClient.placeAggressiveLimit(payload.polyAssetId, payload.isEntry, payload.targetSize, payload.polyMaxVwap),
-                this.kalshiClient.placeAggressiveLimit(payload.kalshiTicker, payload.isEntry, payload.targetSize, payload.kalshiMaxVwap)
+                this.kalshiClient.placeAggressiveLimit(payload.kalshiTicker, payload.kalshiSide, payload.isEntry, payload.targetSize, payload.kalshiMaxVwap)
             ]);
 
             await this.reconcile(payload, polyReceipt, kalshiReceipt);
@@ -98,7 +105,7 @@ export class LiveEngine {
 
             if (kalshiFilled) {
                 console.error(`[LIVE ENGINE] Kalshi filled, Polymarket failed. Triggering Kalshi Emergency Hedge...`);
-                this.triggerEmergencyHedge('Kalshi', payload.kalshiTicker, payload.isEntry, kalshiReceipt.executedSize || payload.targetSize);
+                this.triggerEmergencyHedge('Kalshi', payload.kalshiTicker, payload.isEntry, kalshiReceipt.executedSize || payload.targetSize, payload.kalshiSide);
             }
         }
     }
@@ -121,7 +128,7 @@ export class LiveEngine {
         return totalFeeCents / 100; // Return in dollars
     }
 
-    private triggerEmergencyHedge(exchange: 'Polymarket' | 'Kalshi', assetIdentifier: string, originalEntry: boolean, size: number) {
+    private triggerEmergencyHedge(exchange: 'Polymarket' | 'Kalshi', assetIdentifier: string, originalEntry: boolean, size: number, kalshiSide: 'yes' | 'no' = 'yes') {
         // We trigger asynchronously without awaiting so the main engine doesn't block
         setImmediate(async () => {
             try {
@@ -136,7 +143,7 @@ export class LiveEngine {
                 } else if (exchange === 'Kalshi') {
                     const dumpPriceCents = hedgeDirection ? 0.01 : 0.99;
                     console.log(`[EMERGENCY ROUTINE] Selling ${size} shares on Kalshi for ${assetIdentifier}`);
-                    await this.kalshiClient.placeAggressiveLimit(assetIdentifier, hedgeDirection, size, dumpPriceCents);
+                    await this.kalshiClient.placeAggressiveLimit(assetIdentifier, kalshiSide, hedgeDirection, size, dumpPriceCents);
                 }
                 console.log(`[EMERGENCY ROUTINE] Hedge execution request sent for ${exchange}.`);
             } catch (err) {

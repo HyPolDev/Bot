@@ -27,7 +27,7 @@ async function runTests() {
     console.log(`[TEST 1] Pinging Kalshi REST API...`);
     console.log(`  -> Attempting to buy 500 contract of ${TEST_KALSHI_TICKER} @ $0.01`);
 
-    const kalshiResult = await kalshiClient.placeAggressiveLimit(TEST_KALSHI_TICKER, true, TEST_SIZE, TEST_PRICE_VWAP);
+    const kalshiResult = await kalshiClient.placeAggressiveLimit(TEST_KALSHI_TICKER, 'yes', true, TEST_SIZE, TEST_PRICE_VWAP);
     console.log(`\nKalshi Response:`);
     console.dir(kalshiResult, { depth: null, colors: true });
 

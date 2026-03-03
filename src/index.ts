@@ -7,6 +7,7 @@ import { PairManager, CandidatePair } from './monitor/pair_manager.js';
 import { CLI } from './cli/dashboard.js';
 import { PortfolioManager } from './portfolio/portfolio_manager.js';
 import { RiskManager } from './portfolio/risk_manager.js';
+import { LiveEngine } from './execution/live_engine.js';
 
 dotenv.config({ override: true });
 
@@ -37,6 +38,8 @@ async function bootSystem() {
     const INITIAL_KALSHI_CASH = 5000;
     const portfolio = new PortfolioManager(INITIAL_POLY_CASH, INITIAL_KALSHI_CASH);
     const riskManager = new RiskManager(portfolio);
+    const liveEngine = new LiveEngine(portfolio);
+
 
     const activeManagers: PairManager[] = [];
 
@@ -47,7 +50,7 @@ async function bootSystem() {
         const pair = pairs[i];
 
         // Pass the global singletons into each PairManager
-        const manager = new PairManager(pair, portfolio, riskManager);
+        const manager = new PairManager(pair, portfolio, riskManager, liveEngine);
 
         manager.start(); // Start background sync
         activeManagers.push(manager);

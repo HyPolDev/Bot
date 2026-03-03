@@ -37,7 +37,7 @@ export class KalshiClient {
         ).toString('base64');
     }
 
-    public async placeAggressiveLimit(ticker: string, isEntry: boolean, size: number, maxVwap: number): Promise<ExecutionReceipt> {
+    public async placeAggressiveLimit(ticker: string, side: 'yes' | 'no', isEntry: boolean, size: number, maxVwap: number): Promise<ExecutionReceipt> {
         const timestamp = Date.now();
         const action = isEntry ? 'buy' : 'sell';
         const yesPriceCents = Math.floor(maxVwap * 100);
@@ -59,7 +59,7 @@ export class KalshiClient {
                 },
                 body: JSON.stringify({
                     action: action,
-                    side: 'yes',
+                    side: side,
                     ticker: ticker,
                     count: size,
                     client_order_id: clientOrderId,
