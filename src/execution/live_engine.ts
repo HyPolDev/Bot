@@ -24,23 +24,18 @@ export class LiveEngine {
             payload.targetSize = this.maxPositionSize;
         }
 
-        const nominalPolySize = payload.targetSize * payload.polyMaxVwap;
-        if (nominalPolySize < 1.00) {
-            console.warn(`[LIVE ENGINE] Aborting trade: Polymarket nominal sizing $${nominalPolySize.toFixed(2)} is strictly below the $1.00 minimum threshold.`);
+        const nominalPolyUsd = payload.targetSize * payload.polyMaxVwap;
+        if (nominalPolyUsd < 1.00) {
+            console.log(`[LIVE ENGINE] Aborting Poly Order. Nominal size $${nominalPolyUsd.toFixed(2)} is less than Polymarket $1.00 constraint.`);
             return;
         }
 
         console.log(`[LIVE ENGINE] Firing concurrent FOK/IOC orders for pair ${payload.pairId}`);
 
-        // Kalshi IOC bounds are rigid; we artificially inject a 3-cent buffer to guarantee sweeping the limit book
-        const kalshiAggressiveVwap = payload.isEntry
-            ? Math.min(payload.kalshiMaxVwap + 0.03, 0.99)
-            : Math.max(payload.kalshiMaxVwap - 0.03, 0.01);
-
         try {
             const [polyReceipt, kalshiReceipt] = await Promise.all([
                 this.polyClient.placeAggressiveLimit(payload.polyAssetId, payload.isEntry, payload.targetSize, payload.polyMaxVwap),
-                this.kalshiClient.placeAggressiveLimit(payload.kalshiTicker, payload.kalshiSide, payload.isEntry, payload.targetSize, kalshiAggressiveVwap)
+                this.kalshiClient.placeAggressiveLimit(payload.kalshiTicker, payload.kalshiSide, payload.isEntry, payload.targetSize, payload.kalshiMaxVwap)
             ]);
 
             await this.reconcile(payload, polyReceipt, kalshiReceipt);
