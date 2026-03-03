@@ -138,11 +138,11 @@ export class LiveEngine {
                 if (exchange === 'Polymarket') {
                     // E.g., min valid price to ensure execution
                     const dumpPrice = hedgeDirection ? 0.01 : 0.99;
-                    console.log(`[EMERGENCY ROUTINE] Selling ${size} shares on Polymarket for ${assetIdentifier}`);
+                    console.log(`[EMERGENCY ROUTINE] Reverse action (${hedgeDirection ? 'BUY' : 'SELL'}) ${size} shares on Polymarket for ${assetIdentifier}`);
                     await this.polyClient.placeAggressiveLimit(assetIdentifier, hedgeDirection, size, dumpPrice);
                 } else if (exchange === 'Kalshi') {
                     const dumpPriceCents = hedgeDirection ? 0.01 : 0.99;
-                    console.log(`[EMERGENCY ROUTINE] Selling ${size} shares on Kalshi for ${assetIdentifier}`);
+                    console.log(`[EMERGENCY ROUTINE] Reverse action (${hedgeDirection ? 'BUY' : 'SELL'}) ${size} shares on Kalshi for ${assetIdentifier} (${kalshiSide})`);
                     await this.kalshiClient.placeAggressiveLimit(assetIdentifier, kalshiSide, hedgeDirection, size, dumpPriceCents);
                 }
                 console.log(`[EMERGENCY ROUTINE] Hedge execution request sent for ${exchange}.`);
