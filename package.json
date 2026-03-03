@@ -13,7 +13,7 @@
     "test-balances": "npx tsx src/test/test_balances.ts",
     "test-rpcs": "npx tsx src/test/test_rpcs.ts",
     "test-all": "npm run test-execution && npm run test-risk && npm run test-balances && npm run test-rpcs",
-    "test-discovery": "chmod +x ./src/test/test_discovery.sh && ./src/test/test_discovery.sh"
+    "manual-discovery": "chmod +x ./src/test/test_discovery.sh && ./src/test/test_discovery.sh"
   },
   "devDependencies": {
     "@types/cli-progress": "^3.11.6",

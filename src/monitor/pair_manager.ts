@@ -121,7 +121,7 @@ export class PairManager {
                 ghostMap.set(price, realSize);
             }
 
-            const remainingSize = realSize - ghostMap.get(price)!;
+            const remainingSize = realSize - (ghostMap.get(price) || 0);
 
             if (remainingSize > 0) {
                 adjusted.push({ price, size: remainingSize });
@@ -163,10 +163,10 @@ export class PairManager {
 
             if (isEntry) {
                 const netCostPerShare = p.price + k.price + kFeePerShare;
-                if (netCostPerShare >= 0.985) break;
+                if (netCostPerShare >= 0.99) break;
             } else {
                 const netRevenuePerShare = p.price + k.price - kFeePerShare;
-                if (netRevenuePerShare < 0.97) break;
+                if (netRevenuePerShare <= 0.99) break;
             }
 
             const overlap = Math.min(p.size, k.size);

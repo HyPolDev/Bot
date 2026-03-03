@@ -16,6 +16,8 @@ llm_mismatches.json
 portfolio_ledger.txt
 logs/
 agents/docs/polymarket/*
+/temp-tests/*
+
 # Preserve /data folder
 /data/*
 !/data/.gitkeep
@@ -23,4 +25,4 @@ agents/docs/polymarket/*
 
 # Preserve /test/__fixtures__ folder
 /src/test/__fixtures__/*
-!/src/test/__fixtures__/.gitkeep
+!/src/test/__fixtures__/.gitkeeptemp-tests/

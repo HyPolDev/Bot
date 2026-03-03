@@ -164,10 +164,10 @@ async function run() {
     const matcher = new MarketEntityMatcher();
     await matcher.init('Xenova/bge-small-en-v1.5', 'Xenova/bge-reranker-base');
 
-    const groupedMarkets = await matcher.processAllMarkets(markets, 0.82);
+    const groupedMarkets = await matcher.processAllMarkets(markets, 0.90);
 
-    // --- NEW: Apply the Time Filter ---
-    const timeFilteredMarkets = filterByExpirationWindow(groupedMarkets, 4);
+    // Apply the Time Filter
+    const timeFilteredMarkets = filterByExpirationWindow(groupedMarkets, 24);
 
     console.log(`\nRanking ${timeFilteredMarkets.length} candidates by similarity and expiration date...`);
 
