@@ -6,7 +6,8 @@ enum ViewState {
     HOME,
     ORDERBOOK_LIST,
     ORDERBOOK_LIVE,
-    POSITIONS
+    POSITIONS,
+    POSITION_LIVE
 }
 
 export class CLI {
@@ -15,10 +16,13 @@ export class CLI {
 
     private viewState: ViewState = ViewState.HOME;
     private activeManager: PairManager | null = null;
+    private activePosition: Position | null = null;
 
     private renderedLines: number = 0;
     private cursorIndex: number = 0;
+    private positionCursorIndex: number = 0;
     private readonly PAGE_SIZE: number = 15;
+    private readonly POSITIONS_PAGE_SIZE: number = 5;
 
     private refreshInterval: NodeJS.Timeout | null = null;
 
@@ -95,9 +99,36 @@ export class CLI {
                     break;
 
                 case ViewState.POSITIONS:
-                    if (key.name === 'b') {
+                    if (key.name === 'up' && this.positionCursorIndex > 0) {
+                        this.positionCursorIndex--;
+                        this.renderPositions();
+                    } else if (key.name === 'down') {
+                        const positions = this.portfolio.getOpenPositions();
+                        if (this.positionCursorIndex < positions.length - 1) {
+                            this.positionCursorIndex++;
+                            this.renderPositions();
+                        }
+                    } else if (key.name === 'return' || key.name === 'enter') {
+                        const positions = this.portfolio.getOpenPositions();
+                        if (positions.length > 0) {
+                            this.activePosition = positions[this.positionCursorIndex];
+                            this.activeManager = this.managers.find(m => m.pairId === this.activePosition!.pairId) || null;
+                            this.viewState = ViewState.POSITION_LIVE;
+                            this.viewPositionLive();
+                        }
+                    } else if (key.name === 'b') {
                         this.viewState = ViewState.HOME;
                         this.renderHome();
+                    }
+                    break;
+
+                case ViewState.POSITION_LIVE:
+                    if (key.name === 'b') {
+                        if (this.activeManager) this.activeManager.detachViewer();
+                        this.activeManager = null;
+                        this.activePosition = null;
+                        this.viewState = ViewState.POSITIONS;
+                        this.renderPositions();
                     }
                     break;
             }
@@ -163,17 +194,30 @@ export class CLI {
 
         let output = `\n=============================================================\n`;
         output += `                      ACTIVE POSITIONS (${positions.length})\n`;
-        output += `=============================================================\n\n`;
+        output += `=============================================================\n`;
+        output += `Use UP/DOWN arrows to navigate. Press 'b' to go back.\n\n`;
 
         if (positions.length === 0) {
             output += `  No active trades. Scanning for opportunities...\n\n`;
         } else {
-            positions.forEach((pos, i) => {
-                output += `  [${i + 1}] ${pos.marketQuestion.substring(0, 50)}...\n`;
-                output += `      Type : ${pos.type}\n`;
-                output += `      Size : ${pos.size} contracts\n`;
-                output += `      Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice}¢ | Kalshi @ ${pos.kalshiEntryPrice}¢)\n\n`;
-            });
+            const pageStart = Math.floor(this.positionCursorIndex / this.POSITIONS_PAGE_SIZE) * this.POSITIONS_PAGE_SIZE;
+            const pageEnd = Math.min(pageStart + this.POSITIONS_PAGE_SIZE, positions.length);
+
+            for (let i = pageStart; i < pageEnd; i++) {
+                const pos = positions[i];
+                if (i === this.positionCursorIndex) {
+                    output += `  > \x1b[36m[${i + 1}] ${pos.marketQuestion.substring(0, 50)}...\x1b[0m\n`;
+                    output += `    \x1b[36m  Type : ${pos.type}\x1b[0m\n`;
+                    output += `    \x1b[36m  Size : ${pos.size} contracts\x1b[0m\n`;
+                    output += `    \x1b[36m  Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice.toFixed(3)} | Kalshi @ ${pos.kalshiEntryPrice.toFixed(3)})\x1b[0m\n\n`;
+                } else {
+                    output += `    [${i + 1}] ${pos.marketQuestion.substring(0, 50)}...\n`;
+                    output += `        Type : ${pos.type}\n`;
+                    output += `        Size : ${pos.size} contracts\n`;
+                    output += `        Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice.toFixed(3)} | Kalshi @ ${pos.kalshiEntryPrice.toFixed(3)})\n\n`;
+                }
+            }
+            output += `Showing ${pageStart + 1}-${pageEnd} of ${positions.length}\n`;
         }
 
         output += `=============================================================\n`;
@@ -222,6 +266,7 @@ export class CLI {
         // Attach CLI to manager's instant update loop
         manager.attachViewer(() => {
             if (this.viewState === ViewState.ORDERBOOK_LIVE) this.renderDashboard();
+            else if (this.viewState === ViewState.POSITION_LIVE) this.renderPositionLive();
         });
         this.renderDashboard();
     }
@@ -264,6 +309,73 @@ export class CLI {
         } else {
             output += renderBook('YES OUTCOME', poly.yes, kalshi.yes) + `\n`;
             output += renderBook('NO OUTCOME', poly.no, kalshi.no);
+        }
+
+        output += `=============================================================\n`;
+        output += ` Press 'b' to return to list | Press 'q' to exit\n`;
+
+        this.renderedLines = output.split('\n').length - 1;
+        process.stdout.write(output);
+    }
+
+    private viewPositionLive() {
+        if (!this.activePosition || !this.activeManager) return;
+        this.renderedLines = 0;
+        console.clear();
+
+        this.activeManager.attachViewer(() => {
+            if (this.viewState === ViewState.POSITION_LIVE) this.renderPositionLive();
+        });
+        this.renderPositionLive();
+    }
+
+    private renderPositionLive() {
+        if (!this.activePosition || !this.activeManager || this.viewState !== ViewState.POSITION_LIVE) return;
+
+        const poly = this.activeManager.latestPolyBook;
+        const kalshi = this.activeManager.latestKalshiBook;
+        const pos = this.activePosition;
+
+        this.clearScreenHelper();
+
+        const formatLevel = (lvl: any) => {
+            if (!lvl) return "     ---    ".padEnd(17);
+            const price = (lvl.price * 100).toFixed(1) + "¢";
+            const size = lvl.size >= 1000 ? (lvl.size / 1000).toFixed(1) + "k" : Math.floor(lvl.size).toString();
+            return `${price.padStart(5)} [${size.padStart(6)}]`.padEnd(17);
+        };
+
+        const renderBookDepth2 = (title: string, pBook: any, kBook: any) => {
+            let str = `  === ${title} ===\n`;
+            str += `  EXCHANGE     |  POLYMARKET        |  KALSHI\n`;
+            for (let i = 1; i >= 0; i--) {
+                str += `  Ask ${i + 1}        |  ${formatLevel(pBook?.asks[i])} |  ${formatLevel(kBook?.asks[i])}\n`;
+            }
+            str += `  -------------+--------------------+---------------------\n`;
+            for (let i = 0; i < 2; i++) {
+                str += `  Bid ${i + 1}        |  ${formatLevel(pBook?.bids[i])} |  ${formatLevel(kBook?.bids[i])}\n`;
+            }
+            return str;
+        };
+
+        const qA = this.activeManager.pairData.polyMarket.market_question;
+        const qB = this.activeManager.pairData.kalshiMarket.market_question;
+
+        let output = `\n=============================================================\n`;
+        output += `  🔵 (Poly)  : ${qA.substring(0, 50)}...\n`;
+        output += `  🟢 (Kalshi): ${qB.substring(0, 50)}...\n`;
+        output += `=============================================================\n`;
+        output += `  [ ENTRY DETAILS ]\n`;
+        output += `  Type  : ${pos.type}                 Size : ${pos.size} contracts\n`;
+        output += `  Cost  : $${pos.totalCost.toFixed(2)}\n`;
+        output += `  Basis : Poly @ ${(pos.polyEntryPrice * 100).toFixed(1)}¢ | Kalshi @ ${(pos.kalshiEntryPrice * 100).toFixed(1)}¢\n`;
+        output += `=============================================================\n`;
+
+        if (!kalshi) {
+            output += `\n  Waiting for Kalshi initialization...\n\n`;
+        } else {
+            output += renderBookDepth2('YES OUTCOME', poly.yes, kalshi.yes) + `\n`;
+            output += renderBookDepth2('NO OUTCOME', poly.no, kalshi.no);
         }
 
         output += `=============================================================\n`;
