@@ -234,6 +234,9 @@ export class PairManager {
         const sweep = this.calculateSweep(polyAsks, kalshiAsks, true);
 
         if (sweep.size > 0) {
+            const nominalPolySize = sweep.size * sweep.polyVwap;
+            if (nominalPolySize < 1.00) return;
+
             const approvedSize = this.risk.calculateApprovedSize(
                 this.pairId, sweep.polyVwap, sweep.kalshiVwap, sweep.size * 2, sweep.size * 2
             );
@@ -366,6 +369,9 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
         const sweep = this.calculateSweep(targetPolyBids, targetKalshiBids, false, position.size);
 
         if (sweep.size > 0) {
+            const nominalPolySize = sweep.size * sweep.polyVwap;
+            if (nominalPolySize < 1.00) return;
+
             this.lastArbitrageTime = now;
             if (this.PAPER_TRADE_MODE) {
                 this.executePaperExit(position, sweep.size, sweep.polyVwap + sweep.kalshiVwap);

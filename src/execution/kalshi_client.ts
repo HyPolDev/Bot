@@ -146,4 +146,79 @@ export class KalshiClient {
             };
         }
     }
+
+    public async placeMarketOrder(ticker: string, side: 'yes' | 'no', isEntry: boolean, size: number): Promise<ExecutionReceipt> {
+        const timestamp = Date.now();
+        const action = isEntry ? 'buy' : 'sell';
+        const clientOrderId = crypto.randomUUID();
+
+        const endpoint = '/portfolio/orders';
+        const signaturePath = `/trade-api/v2${endpoint}`;
+
+        try {
+            const signature = this.sign(timestamp, 'POST', signaturePath);
+
+            const response = await fetch(`${this.baseUrl}${endpoint}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'KALSHI-ACCESS-KEY': this.keyId,
+                    'KALSHI-ACCESS-SIGNATURE': signature,
+                    'KALSHI-ACCESS-TIMESTAMP': timestamp.toString(),
+                },
+                body: JSON.stringify({
+                    action: action,
+                    side: side,
+                    ticker: ticker,
+                    count: size,
+                    client_order_id: clientOrderId,
+                    type: 'market' // Native market order type
+                })
+            });
+
+            if (!response.ok) {
+                const errorStr = await response.text();
+                return {
+                    exchange: 'Kalshi',
+                    status: 'failed',
+                    error: `HTTP Error ${response.status}: ${errorStr}`
+                };
+            }
+
+            const data = await response.json();
+            const orderInfo = data.order || {};
+            const orderId = orderInfo.order_id || clientOrderId;
+            const status = orderInfo.status;
+
+            if (status === 'executed') {
+                return {
+                    exchange: 'Kalshi',
+                    status: 'filled',
+                    orderId: orderId,
+                    executedPrice: 0, // Unfilled info natively until queried, but executed
+                    executedSize: orderInfo.actual_count || size
+                };
+            } else if (status === 'canceled') {
+                return {
+                    exchange: 'Kalshi',
+                    status: 'canceled',
+                    orderId: orderId,
+                    error: 'Market Order was canceled'
+                };
+            } else {
+                return {
+                    exchange: 'Kalshi',
+                    status: 'failed',
+                    orderId: orderId,
+                    error: `Order returned unhandled status for Market Order: ${status}`
+                };
+            }
+        } catch (error: any) {
+            return {
+                exchange: 'Kalshi',
+                status: 'failed',
+                error: error.message || 'Unknown network error'
+            };
+        }
+    }
 }

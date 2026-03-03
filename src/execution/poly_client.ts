@@ -120,4 +120,45 @@ export class PolyClient {
             };
         }
     }
+
+    public async placeMarketOrder(tokenId: string, isEntry: boolean, size: number): Promise<ExecutionReceipt> {
+        try {
+            // A market order generally uses OrderType.MARKET in clob-client.
+            // The clob-client handles Market logic via FAK (Fill And Kill) or FOK 
+            // combined with aggressive limit pricing.
+            const signedOrder = await this.client.createOrder({
+                tokenID: tokenId,
+                price: isEntry ? 0.99 : 0.01,
+                side: (isEntry ? Side.BUY : Side.SELL) as Side,
+                size: size,
+                feeRateBps: 0
+            });
+
+            const response = await this.client.postOrder(signedOrder, OrderType.FAK);
+
+            if (response.success) {
+                return {
+                    exchange: 'Polymarket',
+                    status: 'filled',
+                    orderId: response.orderID,
+                    executedPrice: 0, // Unknown precisely until we fetch fills, but market order executed
+                    executedSize: size
+                };
+            } else {
+                const errorStr = response.errorMsg || JSON.stringify(response);
+                return {
+                    exchange: 'Polymarket',
+                    status: 'failed',
+                    orderId: response.orderID || 'unknown',
+                    error: errorStr
+                };
+            }
+        } catch (error: any) {
+            return {
+                exchange: 'Polymarket',
+                status: 'failed',
+                error: error.message || 'Unknown network error'
+            };
+        }
+    }
 }

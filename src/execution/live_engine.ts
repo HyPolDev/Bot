@@ -132,18 +132,17 @@ export class LiveEngine {
         // We trigger asynchronously without awaiting so the main engine doesn't block
         setImmediate(async () => {
             try {
-                // To flatten delta, we reverse the direction
                 const hedgeDirection = !originalEntry; // if we bought, we now sell
-                // Try to offload immediately (fire a very aggressive limit that acts as a market order)
+
                 if (exchange === 'Polymarket') {
-                    // E.g., min valid price to ensure execution
-                    const dumpPrice = hedgeDirection ? 0.01 : 0.99;
+                    console.log(`[EMERGENCY ROUTINE] Waiting 5 seconds for Polymarket Blockchain settlement before dumping...`);
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+
                     console.log(`[EMERGENCY ROUTINE] Reverse action (${hedgeDirection ? 'BUY' : 'SELL'}) ${size} shares on Polymarket for ${assetIdentifier}`);
-                    await this.polyClient.placeAggressiveLimit(assetIdentifier, hedgeDirection, size, dumpPrice);
+                    await this.polyClient.placeMarketOrder(assetIdentifier, hedgeDirection, size);
                 } else if (exchange === 'Kalshi') {
-                    const dumpPriceCents = hedgeDirection ? 0.01 : 0.99;
                     console.log(`[EMERGENCY ROUTINE] Reverse action (${hedgeDirection ? 'BUY' : 'SELL'}) ${size} shares on Kalshi for ${assetIdentifier} (${kalshiSide})`);
-                    await this.kalshiClient.placeAggressiveLimit(assetIdentifier, kalshiSide, hedgeDirection, size, dumpPriceCents);
+                    await this.kalshiClient.placeMarketOrder(assetIdentifier, kalshiSide, hedgeDirection, size);
                 }
                 console.log(`[EMERGENCY ROUTINE] Hedge execution request sent for ${exchange}.`);
             } catch (err) {
