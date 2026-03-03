@@ -300,7 +300,7 @@ export class CLI {
         };
 
         let output = `\n=============================================================\n`;
-        output += ` MARKET: ${this.activeManager.pairData.polyMarket.market_question.substring(0, 50)}...\n`;
+        output += ` MARKET: ${this.activeManager.pairData.polyMarket.market_question}\n`;
         output += ` ALIGNMENT: ${this.activeManager.pairData.outcomeAlignment === 1 ? 'ALIGNED (+1)' : 'FLIPPED (-1)'}\n`;
         output += `=============================================================\n`;
 
@@ -362,8 +362,8 @@ export class CLI {
         const qB = this.activeManager.pairData.kalshiMarket.market_question;
 
         let output = `\n=============================================================\n`;
-        output += `  🔵 (Poly)  : ${qA.substring(0, 50)}...\n`;
-        output += `  🟢 (Kalshi): ${qB.substring(0, 50)}...\n`;
+        output += `  🔵 (Poly)  : ${qA}\n`;
+        output += `  🟢 (Kalshi): ${qB}\n`;
         output += `=============================================================\n`;
         output += `  [ ENTRY DETAILS ]\n`;
         output += `  Type  : ${pos.type}                 Size : ${pos.size} contracts\n`;
