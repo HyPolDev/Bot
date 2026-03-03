@@ -42,8 +42,8 @@ export class PolyClient {
         try {
             // ClobClient v5+ typically has getAllowance or similar. However, the exact API might differ. 
             // We can fetch the raw USDC Polygon ERC20 balance using ethers or if clob provides it directly.
-            // Using standard ethers fallback to Polygon mainnet:
-            const rpcUrl = "https://polygon-rpc.com";
+            // Using standard ethers fallback to Polygon mainnet
+            const rpcUrl = "https://polygon-rpc.com/";
             const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
 
             let privateKey = process.env.POLY_PRIVATE_KEY || '0x00';
