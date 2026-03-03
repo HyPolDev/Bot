@@ -360,10 +360,15 @@ export class CLI {
 
         const qA = this.activeManager.pairData.polyMarket.market_question;
         const qB = this.activeManager.pairData.kalshiMarket.market_question;
+        const rA = this.activeManager.pairData.polyMarket.market_rules;
+        const rB = this.activeManager.pairData.kalshiMarket.market_rules;
 
+        // Wrap the rules if they are too long (optional, but probably good to just let terminal wrap or output it raw as requested by "full rules")
         let output = `\n=============================================================\n`;
         output += `  🔵 (Poly)  : ${qA}\n`;
+        output += `  🔵 (Rules) : ${rA}\n\n`;
         output += `  🟢 (Kalshi): ${qB}\n`;
+        output += `  🟢 (Rules) : ${rB}\n`;
         output += `=============================================================\n`;
         output += `  [ ENTRY DETAILS ]\n`;
         output += `  Type  : ${pos.type}                 Size : ${pos.size} contracts\n`;

@@ -10,6 +10,7 @@ export interface UnifiedMarket {
     platform: string;
     original_url_slug: string;
     market_question: string;
+    market_rules: string;
 }
 
 export interface CandidatePair {

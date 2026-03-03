@@ -31,8 +31,8 @@ export class RiskManager {
         const bottleneckCapital = Math.min(polyCash, kalshiCash);
 
         // Dynamic logarithmic risk scaling
-        const maxEquityPerTrade = this.calculateDynamicRisk(bottleneckCapital, 0.30, 0.05);
-        const maxEquityPerPair = this.calculateDynamicRisk(bottleneckCapital, 0.30, 0.10);
+        const maxEquityPerTrade = this.calculateDynamicRisk(bottleneckCapital, 0.30, 0.02);
+        const maxEquityPerPair = this.calculateDynamicRisk(bottleneckCapital, 0.30, 0.05);
 
         const totalEquity = this.portfolio.getTotalEquity();
         const costPerContract = polyPrice + kalshiPrice;
