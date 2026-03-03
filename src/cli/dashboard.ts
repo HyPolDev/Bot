@@ -123,8 +123,14 @@ export class CLI {
         const pnl = this.portfolio.getRealizedPnL();
         const positions = this.portfolio.getOpenPositions().length;
 
+        const isPaper = process.env.PAPER_TRADE !== 'false';
+        const modeLabel = isPaper
+            ? `\x1b[32m[🛡️  PAPER SIMULATION ACTIVE]\x1b[0m`
+            : `\x1b[31m[⚠️  LIVE DEPLOYMENT AUTHORIZED ⚠️ ]\x1b[0m`;
+
         let output = `\n=============================================================\n`;
         output += `                 ARBITRAGE COMMAND CENTER\n`;
+        output += `                 ${modeLabel}\n`;
         output += `=============================================================\n\n`;
 
         output += `  Total Equity      : $${totalEquity.toFixed(2)}\n`;

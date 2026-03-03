@@ -8,6 +8,9 @@ import { CLI } from './cli/dashboard.js';
 import { PortfolioManager } from './portfolio/portfolio_manager.js';
 import { RiskManager } from './portfolio/risk_manager.js';
 import { LiveEngine } from './execution/live_engine.js';
+import { PolyClient } from './execution/poly_client.js';
+import { KalshiClient } from './execution/kalshi_client.js';
+import readline from 'readline';
 
 dotenv.config({ override: true });
 
@@ -17,7 +20,40 @@ const __dirname = path.dirname(__filename);
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function bootSystem() {
-    console.log("[System] Booting Arbitrage Engine...");
+    console.log("=====================================================");
+    console.log("             HFT ARBITRAGE BOOT SEQUENCE             ");
+    console.log("=====================================================");
+
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
+    const mode: string = await new Promise(resolve => {
+        rl.question('\n[?] Select mode: (1) Paper Simulation, (2) Live Deployment: ', answer => {
+            resolve(answer.trim() === '2' ? 'LIVE' : 'PAPER');
+        });
+    });
+
+    rl.close();
+
+    let INITIAL_POLY_CASH = 5000;
+    let INITIAL_KALSHI_CASH = 5000;
+
+    if (mode === 'LIVE') {
+        process.env.PAPER_TRADE = "false";
+        console.log(`\n[System] ⚠️ LIVE DEPLOYMENT AUTHORIZED ⚠️`);
+        console.log(`[System] Fetching live wallets from exchanges...`);
+
+        const polyClient = new PolyClient();
+        const kalshiClient = new KalshiClient();
+
+        INITIAL_POLY_CASH = await polyClient.getCollateralBalance();
+        INITIAL_KALSHI_CASH = await kalshiClient.getBalance();
+    } else {
+        process.env.PAPER_TRADE = "true";
+        console.log(`\n[System] 🛡️ PAPER SIMULATION ACTIVE 🛡️`);
+    }
 
     const pairsFile = path.join(process.cwd(), 'data/market_pairs.json');
     if (!fs.existsSync(pairsFile)) {
@@ -34,11 +70,9 @@ async function bootSystem() {
     }
 
     // --- Initialize Global State Singletons ---
-    const INITIAL_POLY_CASH = 5000;
-    const INITIAL_KALSHI_CASH = 5000;
     const portfolio = new PortfolioManager(INITIAL_POLY_CASH, INITIAL_KALSHI_CASH);
-    const riskManager = new RiskManager(portfolio);
     const liveEngine = new LiveEngine(portfolio);
+    const riskManager = new RiskManager(portfolio);
 
 
     const activeManagers: PairManager[] = [];

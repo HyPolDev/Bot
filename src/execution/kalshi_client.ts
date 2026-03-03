@@ -37,6 +37,38 @@ export class KalshiClient {
         ).toString('base64');
     }
 
+    public async getBalance(): Promise<number> {
+        const timestamp = Date.now();
+        const endpoint = '/portfolio/balance';
+        const signaturePath = `/trade-api/v2${endpoint}`;
+
+        try {
+            const signature = this.sign(timestamp, 'GET', signaturePath);
+            const response = await fetch(`${this.baseUrl}${endpoint}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'KALSHI-ACCESS-KEY': this.keyId,
+                    'KALSHI-ACCESS-SIGNATURE': signature,
+                    'KALSHI-ACCESS-TIMESTAMP': timestamp.toString(),
+                }
+            });
+
+            if (!response.ok) {
+                const errorStr = await response.text();
+                throw new Error(`HTTP Error ${response.status}: ${errorStr}`);
+            }
+
+            const data = await response.json();
+            // Assuming data contains balance in cents under 'balance'
+            const balanceCents = data.balance || 0;
+            return balanceCents / 100; // Returns in dollars
+        } catch (error: any) {
+            console.error(`[KalshiClient] getBalance error:`, error.message);
+            return 0; // Return safe default
+        }
+    }
+
     public async placeAggressiveLimit(ticker: string, side: 'yes' | 'no', isEntry: boolean, size: number, maxVwap: number): Promise<ExecutionReceipt> {
         const timestamp = Date.now();
         const action = isEntry ? 'buy' : 'sell';
