@@ -58,20 +58,23 @@ export class PolyClient {
                     executedPrice: maxVwap,
                     executedSize: size
                 };
-            } else if (response.errorMsg?.toLowerCase().includes('cancel') || response.errorMsg?.toLowerCase().includes('match') || response.errorMsg?.toLowerCase().includes('balance') || response.errorMsg?.toLowerCase().includes('fok')) {
-                return {
-                    exchange: 'Polymarket',
-                    status: 'canceled',
-                    orderId: response.orderID || 'unknown',
-                    error: response
-                };
             } else {
-                return {
-                    exchange: 'Polymarket',
-                    status: 'failed',
-                    orderId: response.orderID || 'unknown',
-                    error: response.errorMsg || 'Order failed to post'
-                };
+                const errorStr = response.errorMsg || JSON.stringify(response);
+                if (errorStr.toLowerCase().includes('cancel') || errorStr.toLowerCase().includes('match') || errorStr.toLowerCase().includes('balance') || errorStr.toLowerCase().includes('fok') || errorStr.toLowerCase().includes('fill')) {
+                    return {
+                        exchange: 'Polymarket',
+                        status: 'canceled',
+                        orderId: response.orderID || 'unknown',
+                        error: errorStr
+                    };
+                } else {
+                    return {
+                        exchange: 'Polymarket',
+                        status: 'failed',
+                        orderId: response.orderID || 'unknown',
+                        error: errorStr
+                    };
+                }
             }
 
         } catch (error: any) {
