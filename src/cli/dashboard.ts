@@ -50,6 +50,7 @@ export class CLI {
     private setupKeyboardListeners() {
         readline.emitKeypressEvents(process.stdin);
         if (process.stdin.isTTY) process.stdin.setRawMode(true);
+        process.stdin.resume(); // CRITICAL FIX: Restore stdin stream after bootloader's rl.close() paused it
 
         process.stdin.on('keypress', (str, key) => {
             if ((key.ctrl && key.name === 'c') || key.name === 'q') {
