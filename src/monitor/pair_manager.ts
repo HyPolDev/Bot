@@ -138,13 +138,13 @@ export class PairManager {
 
     private calculateSweep(
         polyLevels: any[], kalshiLevels: any[], isEntry: boolean, absoluteMax: number = Infinity
-    ): { size: number, polyVwap: number, kalshiVwap: number, totalKalshiFees: number, polyConsumed: Map<number, number>, kalshiConsumed: Map<number, number> } {
+    ): { size: number, polyVwap: number, kalshiVwap: number, polyWorstPrice: number, kalshiWorstPrice: number, kalshiWorstPriceCents: number, totalKalshiFees: number, polyConsumed: Map<number, number>, kalshiConsumed: Map<number, number> } {
 
         const polyConsumed = new Map<number, number>();
         const kalshiConsumed = new Map<number, number>();
 
         if (!polyLevels || !kalshiLevels || polyLevels.length === 0 || kalshiLevels.length === 0) {
-            return { size: 0, polyVwap: 0, kalshiVwap: 0, totalKalshiFees: 0, polyConsumed, kalshiConsumed };
+            return { size: 0, polyVwap: 0, kalshiVwap: 0, polyWorstPrice: 0, kalshiWorstPrice: 0, kalshiWorstPriceCents: 0, totalKalshiFees: 0, polyConsumed, kalshiConsumed };
         }
 
         let pIdx = 0; let kIdx = 0;
@@ -155,6 +155,10 @@ export class PairManager {
         let polyCost = 0;
         let kalshiCost = 0;
         let totalKalshiFees = 0;
+
+        // Track marginal bounds for safe Limit order execution
+        let polyWorstPrice = isEntry ? 0 : 1;
+        let kalshiWorstPrice = isEntry ? 0 : 1;
 
         while (pIdx < pBook.length && kIdx < kBook.length && totalShares < absoluteMax) {
             const p = pBook[pIdx];
@@ -186,16 +190,35 @@ export class PairManager {
             polyConsumed.set(p.price, (polyConsumed.get(p.price) || 0) + safeTake);
             kalshiConsumed.set(k.price, (kalshiConsumed.get(k.price) || 0) + safeTake);
 
+            if (isEntry) {
+                polyWorstPrice = Math.max(polyWorstPrice, p.price);
+                kalshiWorstPrice = Math.max(kalshiWorstPrice, k.price);
+            } else {
+                polyWorstPrice = Math.min(polyWorstPrice, p.price);
+                kalshiWorstPrice = Math.min(kalshiWorstPrice, k.price);
+            }
+
             p.size -= overlap;
             k.size -= overlap;
             if (p.size <= 0) pIdx++;
             if (k.size <= 0) kIdx++;
         }
 
+        // Kalshi strict cent rounding bounds based on entry/exit logic
+        let kalshiWorstPriceCents = 0;
+        if (isEntry) {
+            kalshiWorstPriceCents = Math.ceil(kalshiWorstPrice * 100); // Buy -> Need higher ceiling to guarantee sweep
+        } else {
+            kalshiWorstPriceCents = Math.floor(kalshiWorstPrice * 100); // Sell -> Need lower floor to guarantee sweep
+        }
+
         return {
             size: totalShares,
             polyVwap: totalShares > 0 ? polyCost / totalShares : 0,
             kalshiVwap: totalShares > 0 ? kalshiCost / totalShares : 0,
+            polyWorstPrice,
+            kalshiWorstPrice,
+            kalshiWorstPriceCents,
             totalKalshiFees,
             polyConsumed,
             kalshiConsumed
@@ -254,8 +277,8 @@ export class PairManager {
                         polyAssetId: polyAssetId,
                         kalshiTicker: this.pairData.kalshiMarket.internal_id,
                         kalshiSide: kalshiSide as 'yes' | 'no',
-                        polyMaxVwap: sweep.polyVwap,
-                        kalshiMaxVwap: sweep.kalshiVwap,
+                        polyMaxVwap: sweep.polyWorstPrice, // Execute actual worst price 
+                        kalshiMaxVwap: sweep.kalshiWorstPriceCents / 100, // Execute strictly bounded Cent price
                         isEntry: true
                     });
                 }
@@ -381,8 +404,8 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
                     polyAssetId: polyAssetId,
                     kalshiTicker: this.pairData.kalshiMarket.internal_id,
                     kalshiSide: kalshiSide as 'yes' | 'no',
-                    polyMaxVwap: sweep.polyVwap,
-                    kalshiMaxVwap: sweep.kalshiVwap,
+                    polyMaxVwap: sweep.polyWorstPrice, // Execute actual worst price
+                    kalshiMaxVwap: sweep.kalshiWorstPriceCents / 100, // Execute strictly bounded Cent price
                     isEntry: false
                 });
             }
