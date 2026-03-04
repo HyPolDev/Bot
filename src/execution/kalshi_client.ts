@@ -96,8 +96,8 @@ export class KalshiClient {
                     count: size,
                     client_order_id: clientOrderId,
                     type: 'limit',
-                    yes_price: yesPriceCents,
-                    time_in_force: 'immediate_or_cancel'
+                    ...(side === 'yes' ? { yes_price: yesPriceCents } : { no_price: yesPriceCents }),
+                    time_in_force: 'fill_or_kill'
                 })
             });
 

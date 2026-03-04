@@ -3,7 +3,8 @@ import { KalshiWS } from '../utils/exchanges/kalshi_ws.js';
 import { PortfolioManager } from '../portfolio/portfolio_manager.js';
 import { RiskManager } from '../portfolio/risk_manager.js';
 import { LiveEngine } from '../execution/live_engine.js'; // <-- 1. IMPORT ADDED
-import fs from 'fs';
+import { logger } from '../utils/logger.js';
+import * as fs from 'fs';
 
 export interface UnifiedMarket {
     internal_id: string;
@@ -97,7 +98,7 @@ export class PairManager {
             this.kalshiWsClient.start();
 
         } catch (error) {
-            console.error(`[Error] Failed to start manager for ${this.pairData.polyMarket.internal_id}`, error);
+            logger.error(`[Error] Failed to start manager for ${this.pairData.polyMarket.internal_id}`, error);
         }
     }
 
@@ -168,17 +169,18 @@ export class PairManager {
 
             if (isEntry) {
                 const netCostPerShare = p.price + k.price + kFeePerShare;
-                if (netCostPerShare >= 0.99) break;
+                if (netCostPerShare >= 0.98) break;
             } else {
                 const netRevenuePerShare = p.price + k.price - kFeePerShare;
-                if (netRevenuePerShare <= 0.99) break;
+                if (netRevenuePerShare <= 0.98) break;
             }
 
             const overlap = Math.min(p.size, k.size);
             if (overlap <= 0) break;
 
-            let safeTake = Math.floor(overlap / 2);
+            let safeTake = Math.floor(overlap / 2); // REVERTED: The user requested to keep the / 2 safety buffer to avoid competing head-on with other buyers
             safeTake = Math.min(safeTake, absoluteMax - totalShares);
+            safeTake = Math.floor(safeTake); // FIX: Ensure absolute Kalshi integer compliance
 
             if (safeTake <= 0) break;
 
@@ -226,7 +228,11 @@ export class PairManager {
     }
 
     private evaluateEntry() {
+        if (!this.liveEngine.isSystemReady) return;
         if (!this.latestKalshiBook) return;
+        // Global Safe Execution Guard
+        if ((this.portfolio as any).isPairBanned && (this.portfolio as any).isPairBanned(this.pairId)) return;
+
         const now = Date.now();
         if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
 
@@ -266,20 +272,32 @@ export class PairManager {
                 if (this.PAPER_TRADE_MODE) {
                     this.executePaperTrade(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap);
                 } else {
+                    // pre-execution explicit guard checking real simulated/live budget 
+                    const polyRequiredCost = sweep.polyVwap * approvedSize;
+                    const kalshiRequiredCost = sweep.kalshiVwap * approvedSize;
+
+                    if (this.portfolio.getPolyCash() < polyRequiredCost || this.portfolio.getKalshiCash() < kalshiRequiredCost) {
+                        return; // silently return, do not attempt to send opportunity orders without physical budget
+                    }
+
                     // <-- 6. LIVE ENTRY ROUTING
                     const polyAssetId = type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
                     const kalshiSide = type.includes('KalshiYes') ? 'yes' : 'no';
 
-                    this.liveEngine.executeOrder({
+                    this.liveEngine.queueOrder({
                         pairId: this.pairId,
+                        marketQuestion: this.pairData.polyMarket.market_question,
                         tradeType: type,
                         targetSize: approvedSize,
                         polyAssetId: polyAssetId,
                         kalshiTicker: this.pairData.kalshiMarket.internal_id,
                         kalshiSide: kalshiSide as 'yes' | 'no',
-                        polyMaxVwap: sweep.polyWorstPrice, // Execute actual worst price 
-                        kalshiMaxVwap: sweep.kalshiWorstPriceCents / 100, // Execute strictly bounded Cent price
-                        isEntry: true
+                        polyMaxVwap: Math.floor(sweep.polyWorstPrice * 100) / 100, // Enforce 2 decimal max accuracy
+                        kalshiMaxVwap: sweep.kalshiWorstPriceCents / 100,
+                        isEntry: true,
+                        // Priority Sorting Metrics
+                        spreadMargin: 1 - (sweep.polyVwap + sweep.kalshiVwap),
+                        availableLiquidity: sweep.size,
                     });
                 }
             }
@@ -360,7 +378,10 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
 
     private evaluateExit() {
         const position = this.portfolio.getPosition(this.pairId);
-        if (!position || !this.latestKalshiBook) return;
+        if (!position || !this.latestKalshiBook || !this.liveEngine.isSystemReady) return;
+
+        // Global Safe Execution Guard
+        if ((this.portfolio as any).isPairBanned && (this.portfolio as any).isPairBanned(this.pairId)) return;
 
         const now = Date.now();
         if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
@@ -397,16 +418,20 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
                 const polyAssetId = position.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
                 const kalshiSide = position.type.includes('KalshiYes') ? 'yes' : 'no';
 
-                this.liveEngine.executeOrder({
+                // We queue exit orders with an artificially extremely high margin so they prioritize execution
+                this.liveEngine.queueOrder({
                     pairId: this.pairId,
+                    marketQuestion: this.pairData.polyMarket.market_question,
                     tradeType: position.type,
                     targetSize: sweep.size,
                     polyAssetId: polyAssetId,
                     kalshiTicker: this.pairData.kalshiMarket.internal_id,
                     kalshiSide: kalshiSide as 'yes' | 'no',
-                    polyMaxVwap: sweep.polyWorstPrice, // Execute actual worst price
-                    kalshiMaxVwap: sweep.kalshiWorstPriceCents / 100, // Execute strictly bounded Cent price
-                    isEntry: false
+                    polyMaxVwap: Math.floor(sweep.polyWorstPrice * 100) / 100, // Enforce 2 decimal max accuracy
+                    kalshiMaxVwap: sweep.kalshiWorstPriceCents / 100,
+                    isEntry: false,
+                    spreadMargin: 999, // Exits always jump to the front of the queue
+                    availableLiquidity: sweep.size
                 });
             }
         }

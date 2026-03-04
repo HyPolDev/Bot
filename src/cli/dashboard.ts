@@ -209,12 +209,12 @@ export class CLI {
                     output += `  > \x1b[36m[${i + 1}] ${pos.marketQuestion.substring(0, 50)}...\x1b[0m\n`;
                     output += `    \x1b[36m  Type : ${pos.type}\x1b[0m\n`;
                     output += `    \x1b[36m  Size : ${pos.size} contracts\x1b[0m\n`;
-                    output += `    \x1b[36m  Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice.toFixed(3)} | Kalshi @ ${pos.kalshiEntryPrice.toFixed(3)})\x1b[0m\n\n`;
+                    output += `    \x1b[36m  Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice.toFixed(3)} | Kalshi @ ${pos.kalshiEntryPrice.toFixed(3)} | Fees: $${(pos.totalCost - pos.polyCost - (pos.kalshiEntryPrice * pos.size)).toFixed(2)})\x1b[0m\n\n`;
                 } else {
                     output += `    [${i + 1}] ${pos.marketQuestion.substring(0, 50)}...\n`;
                     output += `        Type : ${pos.type}\n`;
                     output += `        Size : ${pos.size} contracts\n`;
-                    output += `        Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice.toFixed(3)} | Kalshi @ ${pos.kalshiEntryPrice.toFixed(3)})\n\n`;
+                    output += `        Cost : $${pos.totalCost.toFixed(2)} (Poly @ ${pos.polyEntryPrice.toFixed(3)} | Kalshi @ ${pos.kalshiEntryPrice.toFixed(3)} | Fees: $${(pos.totalCost - pos.polyCost - (pos.kalshiEntryPrice * pos.size)).toFixed(2)})\n\n`;
                 }
             }
             output += `Showing ${pageStart + 1}-${pageEnd} of ${positions.length}\n`;
@@ -373,7 +373,7 @@ export class CLI {
         output += `  [ ENTRY DETAILS ]\n`;
         output += `  Type  : ${pos.type}                 Size : ${pos.size} contracts\n`;
         output += `  Cost  : $${pos.totalCost.toFixed(2)}\n`;
-        output += `  Basis : Poly @ ${(pos.polyEntryPrice * 100).toFixed(1)}¢ | Kalshi @ ${(pos.kalshiEntryPrice * 100).toFixed(1)}¢\n`;
+        output += `  Basis : Poly @ ${(pos.polyEntryPrice * 100).toFixed(1)}¢ | Kalshi @ ${(pos.kalshiEntryPrice * 100).toFixed(1)}¢ | Fees: $${(pos.totalCost - pos.polyCost - (pos.kalshiEntryPrice * pos.size)).toFixed(2)}\n`;
         output += `=============================================================\n`;
 
         if (!kalshi) {

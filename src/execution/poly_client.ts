@@ -83,7 +83,7 @@ export class PolyClient {
                 feeRateBps: 0
             });
 
-            const response = await this.client.postOrder(signedOrder, OrderType.FOK);
+            const response = await this.client.postOrder(signedOrder, OrderType.FAK);
 
             if (response.success) {
                 return {

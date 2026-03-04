@@ -17,6 +17,7 @@ portfolio_ledger.txt
 logs/
 agents/docs/polymarket/*
 /temp-tests/*
+test-fak.ts
 
 # Preserve /data folder
 /data/*

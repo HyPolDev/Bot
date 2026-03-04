@@ -1,4 +1,5 @@
-import fs from 'fs';
+import * as fs from 'fs';
+import { logger } from '../utils/logger.js';
 
 export interface Position {
     pairId: string;
@@ -14,16 +15,49 @@ export interface Position {
 }
 
 export class PortfolioManager {
-    private polyCash: number;
-    private kalshiCash: number;
+    private polyCash: number = 0;
+    private kalshiCash: number = 0;
+
+    // Physical Exchange Clients
+    private polyClient: any = null;
+    private kalshiClient: any = null;
+
     private totalRealizedPnL: number = 0;
 
     private openPositions: Map<string, Position> = new Map();
+    private bannedPairs: Map<string, number> = new Map();
 
-    constructor(initialPoly: number, initialKalshi: number) {
+    constructor(initialPoly: number = 0, initialKalshi: number = 0) {
         this.polyCash = initialPoly;
         this.kalshiCash = initialKalshi;
-        console.log(`[Portfolio] Initialized. Poly: $${initialPoly} | Kalshi: $${initialKalshi}`);
+        logger.info(`[Portfolio] Initialized statically. Awaiting Live Sync...`);
+    }
+
+    public attachExchangeClients(polyClient: any, kalshiClient: any) {
+        this.polyClient = polyClient;
+        this.kalshiClient = kalshiClient;
+
+        // Immediately sync and then sync every 60 seconds
+        this.syncBalances();
+        setInterval(() => this.syncBalances(), 60000);
+    }
+
+    public async syncBalances(): Promise<void> {
+        if (!this.polyClient || !this.kalshiClient) return;
+        try {
+            const [realPoly, realKalshi] = await Promise.all([
+                this.polyClient.getCollateralBalance(),
+                this.kalshiClient.getBalance()
+            ]);
+
+            // Forcing the internal tracker to equal the physical blockchain/brokerage truth
+            this.polyCash = realPoly;
+            this.kalshiCash = realKalshi;
+
+            logger.info(`[Portfolio] 🔄 Live Balances Synced -> Poly: $${realPoly.toFixed(2)} | Kalshi: $${realKalshi.toFixed(2)}`);
+        } catch (error) {
+            logger.error(`[Portfolio] ⚠️ Failed to sync physical balances from exchanges.`, error);
+        }
     }
 
     public getPolyCash(): number { return this.polyCash; }
@@ -56,6 +90,26 @@ export class PortfolioManager {
         return position ? position.totalCost : 0;
     }
 
+    // Safety Orchestration: Pair Banning
+    public banPair(pairId: string, durationMs: number = 600000): void {
+        const unbanTime = Date.now() + durationMs;
+        this.bannedPairs.set(pairId, unbanTime);
+        logger.warn(`[SAFETY] 🚫 Pair ${pairId} has been dynamically banned for ${durationMs / 60000} minutes due to an Orphan Event.`);
+    }
+
+    public isPairBanned(pairId: string): boolean {
+        const unbanTime = this.bannedPairs.get(pairId);
+        if (!unbanTime) return false;
+
+        // If the ban has expired, lift it
+        if (Date.now() > unbanTime) {
+            this.bannedPairs.delete(pairId);
+            logger.info(`[SAFETY] 🟢 Ban lifted for Pair ${pairId}.`);
+            return false;
+        }
+        return true;
+    }
+
     public openPosition(
         pairId: string, marketQuestion: string, type: string, size: number,
         polyPrice: number, kalshiPrice: number, kalshiFees: number
@@ -65,7 +119,7 @@ export class PortfolioManager {
         const totalCost = polyCost + kalshiCost + kalshiFees;
 
         if (polyCost > this.polyCash || (kalshiCost + kalshiFees) > this.kalshiCash) {
-            console.error(`[Portfolio] FATAL: Insufficient funds! PolyCost: ${polyCost}, KalshiReq: ${kalshiCost + kalshiFees}`);
+            logger.error(`[Portfolio] FATAL: Insufficient funds! PolyCost: ${polyCost}, KalshiReq: ${kalshiCost + kalshiFees}`);
             return;
         }
 
