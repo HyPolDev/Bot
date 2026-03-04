@@ -37,9 +37,135 @@ export class PortfolioManager {
         this.polyClient = polyClient;
         this.kalshiClient = kalshiClient;
 
+        // Reconstruct State BEFORE starting the interval sync
+        this.recoverPositionsFromLedger();
+
         // Immediately sync and then sync every 60 seconds
         this.syncBalances();
         setInterval(() => this.syncBalances(), 60000);
+    }
+
+    public recoverPositionsFromLedger() {
+        try {
+            if (!fs.existsSync('portfolio_ledger.txt')) return;
+
+            const ledgerData = fs.readFileSync('portfolio_ledger.txt', 'utf8');
+            const lines = ledgerData.split('\n');
+
+            let currentAction: string | null = null;
+            let currentMarket: string | null = null;
+            let currentSize: number = 0;
+            let currentCost: number = 0;
+            let currentType: string = '';
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.includes('LEDGER OPEN:') || line.includes('LEDGER ADD:') || line.includes('LEDGER CLOSE:')) {
+                    const match = line.match(/LEDGER (OPEN|ADD|CLOSE):\s+(.*?)(\.\.\.)?$/);
+                    if (match) {
+                        currentAction = match[1];
+                        currentMarket = match[2].trim();
+                    }
+                } else if (line.includes('Action Size:') || line.includes('Size:')) {
+                    if (currentAction === 'OPEN' || currentAction === 'ADD') {
+                        const match = line.match(/Action Size:\s+\+(\d+)\s+\|\s+Action Cost:\s+\$([\d.]+)\s+\|\s+Type:\s+(\w+)/);
+                        if (match) {
+                            currentSize = parseInt(match[1], 10);
+                            currentCost = parseFloat(match[2]);
+                            currentType = match[3];
+
+                            const pairId = Buffer.from(currentMarket!).toString('base64');
+
+                            let avgEntry = 0;
+                            const nextLine = lines[i + 1] || '';
+                            const avgMatch = nextLine.match(/Avg Entry:\s+([\d.]+)/);
+                            if (avgMatch) {
+                                avgEntry = parseFloat(avgMatch[1]);
+                            }
+
+                            const oldPos = this.openPositions.get(pairId);
+                            const oldSize = oldPos ? oldPos.size : 0;
+                            const oldAvgEntry = oldPos ? (oldPos.polyEntryPrice + oldPos.kalshiEntryPrice) : 0;
+
+                            const newTotalSize = oldSize + currentSize;
+                            let actionEntryPrice = 0;
+                            if (avgEntry > 0) {
+                                actionEntryPrice = (avgEntry * newTotalSize - oldAvgEntry * oldSize) / currentSize;
+                            } else {
+                                actionEntryPrice = currentCost / currentSize;
+                            }
+
+                            const rawExecutionCost = actionEntryPrice * currentSize;
+                            let actionFees = currentCost - rawExecutionCost;
+                            if (actionFees < 0) actionFees = 0;
+
+                            this.openPosition(
+                                pairId,
+                                currentMarket!,
+                                currentType,
+                                currentSize,
+                                actionEntryPrice / 2, // Poly allocation
+                                actionEntryPrice / 2, // kalshi allocation 
+                                actionFees // properly extracted Kalshi taker fees!
+                            );
+                        }
+                    } else if (currentAction === 'CLOSE') {
+                        const match = line.match(/Size:\s+(\d+)\s+\|\s+Type:\s+(\w+)/);
+                        if (match) {
+                            currentSize = parseInt(match[1], 10);
+                            const pairId = Buffer.from(currentMarket!).toString('base64');
+
+                            const pos = this.openPositions.get(pairId);
+                            if (pos) {
+                                if (currentSize >= pos.size) {
+                                    this.openPositions.delete(pairId);
+                                } else {
+                                    const oldSize = pos.size;
+                                    pos.size -= currentSize;
+                                    pos.polyCost -= (currentSize * (pos.polyCost / oldSize));
+                                    pos.kalshiCost -= (currentSize * (pos.kalshiCost / oldSize));
+                                    pos.totalCost -= (currentSize * (pos.totalCost / oldSize));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            const restoredCount = this.openPositions.size;
+            if (restoredCount > 0) {
+                logger.info(`[Portfolio] 🔄 LEDGER RECOVERY COMPLETE: Restored ${restoredCount} active positions into memory.`);
+            }
+
+        } catch (error) {
+            logger.error(`[Portfolio] ⚠️ Failed to recover state from ledger! System booting fresh.`, error);
+        }
+    }
+
+    public relinkRecoveredPositions(managers: any[]) {
+        const toDelete: string[] = [];
+        const toAdd: Position[] = [];
+
+        for (const [oldId, pos] of this.openPositions.entries()) {
+            const searchKey = pos.marketQuestion;
+
+            const matchedManager = managers.find(m =>
+                searchKey.includes(m.pairData.kalshiMarket.internal_id) ||
+                m.pairData.polyMarket.market_question.startsWith(searchKey.replace('...', ''))
+            );
+
+            if (matchedManager && matchedManager.pairId !== oldId) {
+                const realId = matchedManager.pairId;
+                const realQuestion = matchedManager.pairData.polyMarket.market_question;
+
+                const newPos = { ...pos, pairId: realId, marketQuestion: realQuestion };
+                toAdd.push(newPos);
+                toDelete.push(oldId);
+            }
+        }
+
+        for (const id of toDelete) this.openPositions.delete(id);
+        for (const pos of toAdd) this.openPositions.set(pos.pairId, pos);
     }
 
     public async syncBalances(): Promise<void> {

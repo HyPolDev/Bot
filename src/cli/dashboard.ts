@@ -29,6 +29,10 @@ export class CLI {
     constructor(managers: PairManager[], portfolio: PortfolioManager) {
         this.managers = managers;
         this.portfolio = portfolio;
+
+        // Immediately resolve any ledger-recovered positions against the natively launched managers
+        this.portfolio.relinkRecoveredPositions(this.managers);
+
         this.setupKeyboardListeners();
 
         // Start the UI render loop (updates once per second for static screens)
