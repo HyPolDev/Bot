@@ -221,4 +221,40 @@ export class KalshiClient {
             };
         }
     }
+
+    public async getOpenPositions(): Promise<{ ticker: string, position: number }[]> {
+        const timestamp = Date.now();
+        const endpoint = '/portfolio/positions';
+        const signaturePath = `/trade-api/v2${endpoint}`;
+
+        try {
+            const signature = this.sign(timestamp, 'GET', signaturePath);
+            const response = await fetch(`${this.baseUrl}${endpoint}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'KALSHI-ACCESS-KEY': this.keyId,
+                    'KALSHI-ACCESS-SIGNATURE': signature,
+                    'KALSHI-ACCESS-TIMESTAMP': timestamp.toString(),
+                }
+            });
+
+            if (!response.ok) {
+                const errorStr = await response.text();
+                console.error(`[KalshiClient] getOpenPositions HTTP Error ${response.status}: ${errorStr}`);
+                return [];
+            }
+
+            const data = await response.json();
+            const positions = data.positions || [];
+
+            return positions.map((p: any) => ({
+                ticker: p.ticker,
+                position: p.position
+            }));
+        } catch (error: any) {
+            console.error(`[KalshiClient] getOpenPositions error:`, error.message);
+            return [];
+        }
+    }
 }

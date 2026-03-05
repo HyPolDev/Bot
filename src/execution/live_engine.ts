@@ -205,6 +205,12 @@ export class LiveEngine {
                         );
                     }
                 }
+
+                // Fetch the true physical state directly from the exchanges to correct any precision or fee slippage
+                if (typeof this.portfolioManager.syncPositions === 'function') {
+                    // Start an async background sync, no need to await it
+                    this.portfolioManager.syncPositions().catch((e: Error) => logger.error(`Background sync error: ${e.message}`));
+                }
             }
         } else if (!polyFilled && !kalshiFilled) {
             // Total Miss

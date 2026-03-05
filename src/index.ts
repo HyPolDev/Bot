@@ -96,12 +96,18 @@ async function bootSystem() {
         await sleep(200);
     }
 
-    console.log(`\n[System] All data engines online. Launching UI...`);
+    console.log(`\n[System] All data engines online.`);
+
+    // Wire up the physical position tracker to know which managers map to which tokens/tickers
+    portfolio.setManagers(activeManagers);
+    console.log(`[System] Synchronizing physical exchange positions...`);
+    await portfolio.syncBalances();
 
     // Enable the engine to trade now that books are loaded
     liveEngine.isSystemReady = true;
 
     // Launch the interactive dashboard
+    console.log(`[System] Launching UI...`);
     const cli = new CLI(activeManagers, portfolio);
     cli.showMenu();
 }

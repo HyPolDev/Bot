@@ -161,4 +161,34 @@ export class PolyClient {
             };
         }
     }
+
+    public async getOpenPositions(): Promise<{ asset_id: string, size: number, avg_cost: number }[]> {
+        try {
+            const proxyAddress = process.env.POLY_PROXY_ADDRESS;
+            if (!proxyAddress) {
+                console.warn("[PolyClient] POLY_PROXY_ADDRESS missing, returning empty positions.");
+                return [];
+            }
+
+            const res = await fetch(`https://data-api.polymarket.com/positions?user=${proxyAddress}`);
+            if (!res.ok) {
+                const errorStr = await res.text();
+                console.error(`[PolyClient] getOpenPositions HTTP Error ${res.status}: ${errorStr}`);
+                return [];
+            }
+
+            const data = await res.json();
+            if (Array.isArray(data)) {
+                return data.map((p: any) => ({
+                    asset_id: p.asset_id,
+                    size: parseFloat(p.size),
+                    avg_cost: parseFloat(p.avg_cost)
+                }));
+            }
+            return [];
+        } catch (error: any) {
+            console.error(`[PolyClient] getOpenPositions error:`, error.message);
+            return [];
+        }
+    }
 }

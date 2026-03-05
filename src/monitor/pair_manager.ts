@@ -34,8 +34,8 @@ export class PairManager {
     private liveEngine: LiveEngine; // <-- 2. ENGINE ADDED
 
     // <-- 3. TOKEN IDs ADDED (Required for Polymarket live orders)
-    private polyYesTokenId: string = '';
-    private polyNoTokenId: string = '';
+    public polyYesTokenId: string = '';
+    public polyNoTokenId: string = '';
 
     public latestPolyBook: { yes: any, no: any } = { yes: { bids: [], asks: [] }, no: { bids: [], asks: [] } };
     public latestKalshiBook: { yes: any, no: any } | null = null;

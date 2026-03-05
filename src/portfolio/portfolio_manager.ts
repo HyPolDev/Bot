@@ -26,6 +26,11 @@ export class PortfolioManager {
 
     private openPositions: Map<string, Position> = new Map();
     private bannedPairs: Map<string, number> = new Map();
+    private registeredManagers: any[] = [];
+
+    public setManagers(managers: any[]) {
+        this.registeredManagers = managers;
+    }
 
     constructor(initialPoly: number = 0, initialKalshi: number = 0) {
         this.polyCash = initialPoly;
@@ -168,6 +173,80 @@ export class PortfolioManager {
         for (const pos of toAdd) this.openPositions.set(pos.pairId, pos);
     }
 
+    public async syncPositions(): Promise<void> {
+        if (!this.polyClient || !this.kalshiClient || this.registeredManagers.length === 0) return;
+        try {
+            const [polyPositions, kalshiPositions] = await Promise.all([
+                this.polyClient.getOpenPositions(),
+                this.kalshiClient.getOpenPositions()
+            ]);
+
+            const toKeep = new Set<string>();
+
+            for (const manager of this.registeredManagers) {
+                const polyAssetIdYes = manager.polyYesTokenId;
+                const polyAssetIdNo = manager.polyNoTokenId;
+                const kalshiTicker = manager.pairData.kalshiMarket.internal_id;
+
+                const polyPosYes = polyPositions.find((p: any) => p.asset_id === polyAssetIdYes && p.size > 0);
+                const polyPosNo = polyPositions.find((p: any) => p.asset_id === polyAssetIdNo && p.size > 0);
+
+                const kalshiPos = kalshiPositions.filter((p: any) => p.ticker === kalshiTicker && p.position !== 0);
+
+                if ((polyPosYes || polyPosNo) && kalshiPos.length > 0) {
+                    const pairId = manager.pairId;
+                    const pos = this.openPositions.get(pairId);
+
+                    const polySize = polyPosYes ? polyPosYes.size : (polyPosNo ? polyPosNo.size : 0);
+                    const kalshiSize = kalshiPos.reduce((sum: number, p: any) => sum + Math.abs(p.position), 0);
+                    const realSize = Math.min(polySize, kalshiSize);
+
+                    if (realSize > 0) {
+                        toKeep.add(pairId);
+
+                        if (!pos) {
+                            const typeStr = polyPosYes ? "PolyYes_Recovered" : "PolyNo_Recovered";
+                            this.openPositions.set(pairId, {
+                                pairId,
+                                marketQuestion: manager.pairData.polyMarket.market_question,
+                                type: typeStr,
+                                size: realSize,
+                                polyEntryPrice: polyPosYes ? polyPosYes.avg_cost : 0.5,
+                                kalshiEntryPrice: 0.5,
+                                polyCost: (polyPosYes ? polyPosYes.avg_cost : 0.5) * realSize,
+                                kalshiCost: 0.5 * realSize,
+                                totalCost: realSize * 1.0,
+                                timestamp: Date.now()
+                            });
+                            logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize}`);
+                        } else {
+                            if (pos.size !== realSize) {
+                                logger.info(`[Portfolio] 🔄 Resyncing ${pairId} size: memory ${pos.size} -> physical ${realSize}`);
+                                const sizeRatio = realSize / pos.size;
+                                pos.size = realSize;
+                                pos.polyCost *= sizeRatio;
+                                pos.kalshiCost *= sizeRatio;
+                                pos.totalCost *= sizeRatio;
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (const [pairId, pos] of this.openPositions.entries()) {
+                if (!toKeep.has(pairId)) {
+                    const isManaged = this.registeredManagers.some((m: any) => m.pairId === pairId);
+                    if (isManaged) {
+                        logger.info(`[Portfolio] 🔄 Removing ${pairId} from tracker (no physical balance backing).`);
+                        this.openPositions.delete(pairId);
+                    }
+                }
+            }
+        } catch (error) {
+            logger.error(`[Portfolio] ⚠️ Failed to sync physical positions from exchanges.`, error);
+        }
+    }
+
     public async syncBalances(): Promise<void> {
         if (!this.polyClient || !this.kalshiClient) return;
         try {
@@ -176,11 +255,11 @@ export class PortfolioManager {
                 this.kalshiClient.getBalance()
             ]);
 
-            // Forcing the internal tracker to equal the physical blockchain/brokerage truth
             this.polyCash = realPoly;
             this.kalshiCash = realKalshi;
 
             logger.info(`[Portfolio] 🔄 Live Balances Synced -> Poly: $${realPoly.toFixed(2)} | Kalshi: $${realKalshi.toFixed(2)}`);
+            await this.syncPositions();
         } catch (error) {
             logger.error(`[Portfolio] ⚠️ Failed to sync physical balances from exchanges.`, error);
         }
