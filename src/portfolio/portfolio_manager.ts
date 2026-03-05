@@ -207,13 +207,23 @@ export class PortfolioManager {
                         if (!pos) {
                             const typeStr = polyPosYes ? "PolyYes_KalshiNo" : "PolyNo_KalshiYes";
 
-                            // Derive Kalshi entry price from market_exposure (cents) / position
+                            // Derive Kalshi RAW entry price from market_exposure (cents) / position
                             const kalshiExposureCents = kalshiPos.reduce((sum: number, p: any) => sum + Math.abs(p.market_exposure || 0), 0);
-                            const kalshiFeesCents = kalshiPos.reduce((sum: number, p: any) => sum + (p.fees_paid || 0), 0);
-                            const kalshiEntryPrice = kalshiSize > 0 ? (kalshiExposureCents / kalshiSize) / 100 : 0.5;
-                            const kalshiFeesDollars = kalshiFeesCents / 100;
+                            const kalshiRawPrice = kalshiSize > 0 ? (kalshiExposureCents / kalshiSize) / 100 : 0.5;
+
+                            // Estimate Kalshi fee for the matched 'realSize' contracts
+                            // Formula: round_up(0.07 * C * P * (1-P))
+                            const expectedEarningsSpread = kalshiRawPrice * (1 - kalshiRawPrice);
+                            const rawFee = 0.07 * realSize * expectedEarningsSpread;
+                            // Math.ceil(value * 100) / 100 perfectly handles the "round up to the next cent" rule
+                            const estimatedFeeDollars = Math.ceil(rawFee * 100) / 100;
+
+                            // Calculate final Blended UI Cost and Avg Price
+                            const kalshiCost = (kalshiRawPrice * realSize) + estimatedFeeDollars;
+                            const kalshiBlendedEntryPrice = realSize > 0 ? (kalshiCost / realSize) : 0;
 
                             const polyEntryPrice = polyPosYes ? polyPosYes.avg_cost : (polyPosNo ? polyPosNo.avg_cost : 0.5);
+                            const polyCost = polyEntryPrice * realSize;
 
                             this.openPositions.set(pairId, {
                                 pairId,
@@ -221,13 +231,13 @@ export class PortfolioManager {
                                 type: typeStr,
                                 size: realSize,
                                 polyEntryPrice: polyEntryPrice,
-                                kalshiEntryPrice: kalshiEntryPrice,
-                                polyCost: polyEntryPrice * realSize,
-                                kalshiCost: (kalshiEntryPrice * realSize) + kalshiFeesDollars,
-                                totalCost: (polyEntryPrice * realSize) + (kalshiEntryPrice * realSize) + kalshiFeesDollars,
+                                kalshiEntryPrice: kalshiBlendedEntryPrice, // Pushing the blended price to state
+                                polyCost: polyCost,
+                                kalshiCost: kalshiCost, // Pushing the blended cost to state
+                                totalCost: polyCost + kalshiCost,
                                 timestamp: Date.now()
                             });
-                            logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize} | Poly @ ${polyEntryPrice.toFixed(3)} | Kalshi @ ${kalshiEntryPrice.toFixed(3)}`);
+                            logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize} | Poly @ ${polyEntryPrice.toFixed(3)} | Kalshi @ ${kalshiBlendedEntryPrice.toFixed(3)} (Inc. Est. Fees)`);
                         } else {
                             if (pos.size !== realSize) {
                                 logger.info(`[Portfolio] 🔄 Resyncing ${pairId} size: memory ${pos.size} -> physical ${realSize}`);
