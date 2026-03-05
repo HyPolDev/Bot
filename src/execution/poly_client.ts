@@ -180,9 +180,9 @@ export class PolyClient {
             const data = await res.json();
             if (Array.isArray(data)) {
                 return data.map((p: any) => ({
-                    asset_id: p.asset_id,
+                    asset_id: p.asset,
                     size: parseFloat(p.size),
-                    avg_cost: parseFloat(p.avg_cost)
+                    avg_cost: parseFloat(p.avgPrice)
                 }));
             }
             return [];

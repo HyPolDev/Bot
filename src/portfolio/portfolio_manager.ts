@@ -205,20 +205,29 @@ export class PortfolioManager {
                         toKeep.add(pairId);
 
                         if (!pos) {
-                            const typeStr = polyPosYes ? "PolyYes_Recovered" : "PolyNo_Recovered";
+                            const typeStr = polyPosYes ? "PolyYes_KalshiNo" : "PolyNo_KalshiYes";
+
+                            // Derive Kalshi entry price from market_exposure (cents) / position
+                            const kalshiExposureCents = kalshiPos.reduce((sum: number, p: any) => sum + Math.abs(p.market_exposure || 0), 0);
+                            const kalshiFeesCents = kalshiPos.reduce((sum: number, p: any) => sum + (p.fees_paid || 0), 0);
+                            const kalshiEntryPrice = kalshiSize > 0 ? (kalshiExposureCents / kalshiSize) / 100 : 0.5;
+                            const kalshiFeesDollars = kalshiFeesCents / 100;
+
+                            const polyEntryPrice = polyPosYes ? polyPosYes.avg_cost : (polyPosNo ? polyPosNo.avg_cost : 0.5);
+
                             this.openPositions.set(pairId, {
                                 pairId,
                                 marketQuestion: manager.pairData.polyMarket.market_question,
                                 type: typeStr,
                                 size: realSize,
-                                polyEntryPrice: polyPosYes ? polyPosYes.avg_cost : 0.5,
-                                kalshiEntryPrice: 0.5,
-                                polyCost: (polyPosYes ? polyPosYes.avg_cost : 0.5) * realSize,
-                                kalshiCost: 0.5 * realSize,
-                                totalCost: realSize * 1.0,
+                                polyEntryPrice: polyEntryPrice,
+                                kalshiEntryPrice: kalshiEntryPrice,
+                                polyCost: polyEntryPrice * realSize,
+                                kalshiCost: (kalshiEntryPrice * realSize) + kalshiFeesDollars,
+                                totalCost: (polyEntryPrice * realSize) + (kalshiEntryPrice * realSize) + kalshiFeesDollars,
                                 timestamp: Date.now()
                             });
-                            logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize}`);
+                            logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize} | Poly @ ${polyEntryPrice.toFixed(3)} | Kalshi @ ${kalshiEntryPrice.toFixed(3)}`);
                         } else {
                             if (pos.size !== realSize) {
                                 logger.info(`[Portfolio] 🔄 Resyncing ${pairId} size: memory ${pos.size} -> physical ${realSize}`);

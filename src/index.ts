@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import pmxt from 'pmxtjs';
 import { PairManager, CandidatePair } from './monitor/pair_manager.js';
 import { CLI } from './cli/dashboard.js';
 import { PortfolioManager } from './portfolio/portfolio_manager.js';
@@ -114,7 +113,6 @@ async function bootSystem() {
 
 process.on('SIGINT', async () => {
     console.log('\n[System] Shutting down Engine...');
-    await pmxt.stopServer();
     process.exit(0);
 });
 

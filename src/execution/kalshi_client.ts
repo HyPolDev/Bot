@@ -222,7 +222,7 @@ export class KalshiClient {
         }
     }
 
-    public async getOpenPositions(): Promise<{ ticker: string, position: number }[]> {
+    public async getOpenPositions(): Promise<{ ticker: string, position: number, market_exposure: number, fees_paid: number, total_traded: number }[]> {
         const timestamp = Date.now();
         const endpoint = '/portfolio/positions';
         const signaturePath = `/trade-api/v2${endpoint}`;
@@ -246,12 +246,17 @@ export class KalshiClient {
             }
 
             const data = await response.json();
-            const positions = data.positions || [];
+            const positions = data.market_positions || data.positions || [];
 
-            return positions.map((p: any) => ({
-                ticker: p.ticker,
-                position: p.position
-            }));
+            return positions
+                .filter((p: any) => p.position !== 0)
+                .map((p: any) => ({
+                    ticker: p.ticker,
+                    position: p.position,
+                    market_exposure: p.market_exposure || 0,       // cents
+                    fees_paid: p.fees_paid || 0,                   // cents
+                    total_traded: p.total_traded || 0              // cents
+                }));
         } catch (error: any) {
             console.error(`[KalshiClient] getOpenPositions error:`, error.message);
             return [];
