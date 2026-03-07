@@ -67,17 +67,30 @@ export class PairManager {
 
     public async start() {
         try {
-            const polyResponse = await fetch(`https://gamma-api.polymarket.com/markets/${this.pairData.polyMarket.internal_id}`);
-            if (!polyResponse.ok) throw new Error(`Gamma API HTTP ${polyResponse.status}`);
+            let yesTokenId: string;
+            let noTokenId: string;
 
-            const polyMarketData = await polyResponse.json();
-            const clobTokenIds = JSON.parse(polyMarketData.clobTokenIds);
+            // If internal_id already contains pre-resolved token IDs (comma-separated),
+            // skip the Gamma API fetch. This is the case when launched from btc15.ts.
+            if (this.pairData.polyMarket.internal_id.includes(',')) {
+                const parts = this.pairData.polyMarket.internal_id.split(',');
+                yesTokenId = parts[0];
+                noTokenId = parts[1];
+            } else {
+                const polyResponse = await fetch(`https://gamma-api.polymarket.com/markets/${this.pairData.polyMarket.internal_id}`);
+                if (!polyResponse.ok) throw new Error(`Gamma API HTTP ${polyResponse.status}`);
+
+                const polyMarketData = await polyResponse.json();
+                const clobTokenIds = JSON.parse(polyMarketData.clobTokenIds);
+                yesTokenId = clobTokenIds[0];
+                noTokenId = clobTokenIds[1];
+            }
 
             // <-- 5. SAVE TOKEN IDs
-            this.polyYesTokenId = clobTokenIds[0];
-            this.polyNoTokenId = clobTokenIds[1];
+            this.polyYesTokenId = yesTokenId;
+            this.polyNoTokenId = noTokenId;
 
-            this.polyWsClient = new PolymarketWS(clobTokenIds[0], clobTokenIds[1], (source, updatedSide) => {
+            this.polyWsClient = new PolymarketWS(yesTokenId, noTokenId, (source, updatedSide) => {
                 if (updatedSide.isYes) this.latestPolyBook.yes = { bids: updatedSide.bids, asks: updatedSide.asks };
                 else this.latestPolyBook.no = { bids: updatedSide.bids, asks: updatedSide.asks };
 

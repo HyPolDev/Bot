@@ -39,15 +39,18 @@ export class PortfolioManager {
     }
 
     public attachExchangeClients(polyClient: any, kalshiClient: any) {
-        this.polyClient = polyClient;
-        this.kalshiClient = kalshiClient;
+        if (process.env.PAPER_TRADE === "false") {
+            this.polyClient = polyClient;
+            this.kalshiClient = kalshiClient;
 
-        // Reconstruct State BEFORE starting the interval sync
-        this.recoverPositionsFromLedger();
 
-        // Immediately sync and then sync every 60 seconds
-        this.syncBalances();
-        setInterval(() => this.syncBalances(), 60000);
+            // Reconstruct State BEFORE starting the interval sync
+            //this.recoverPositionsFromLedger();
+
+            // Immediately sync and then sync every 60 seconds
+            this.syncBalances();
+            setInterval(() => this.syncBalances(), 60000);
+        }
     }
 
     public recoverPositionsFromLedger() {

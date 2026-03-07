@@ -13,6 +13,7 @@
     "test-balances": "npx tsx src/test/test_balances.ts",
     "test-positions": "npx tsx src/test/test_positions.ts",
     "test-rpcs": "npx tsx src/test/test_rpcs.ts",
+    "test-btc-15": "npx tsx src/test/test_btc_15.ts",
     "test-all": "npm run test-execution && npm run test-risk && npm run test-balances && npm run test-positions && npm run test-rpcs",
     "manual-discovery": "chmod +x ./src/test/test_discovery.sh && ./src/test/test_discovery.sh"
   },
