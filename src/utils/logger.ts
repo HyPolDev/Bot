@@ -23,6 +23,11 @@ class UnifiedLogger {
         fs.appendFileSync(this.logFile, formatted + '\n');
     }
 
+    public system(message: string, ...optionalParams: any[]) {
+        const formatted = this.formatMessage('SYSTEM', message, ...optionalParams);
+        fs.appendFileSync(this.logFile, formatted + '\n');
+    }
+
     public warn(message: string, ...optionalParams: any[]) {
         const formatted = this.formatMessage('WARN', message, ...optionalParams);
         fs.appendFileSync(this.logFile, formatted + '\n');

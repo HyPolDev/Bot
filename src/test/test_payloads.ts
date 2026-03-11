@@ -1,6 +1,8 @@
 import fs from 'fs';
 import { KalshiClient } from '../execution/kalshi_client.js';
 import { PolyClient } from '../execution/poly_client.js';
+import { DatabaseConnection } from '../db/connection.js';
+import { MarketPair } from '../db/models/MarketPair.js';
 
 async function testMatch() {
     const kClient = new KalshiClient();
@@ -9,8 +11,8 @@ async function testMatch() {
     const polyPositions = await pClient.getOpenPositions();
     const kalshiPositions = await kClient.getOpenPositions();
 
-    const pairsStr = fs.readFileSync('data/market_pairs.json', 'utf-8');
-    const pairs = JSON.parse(pairsStr);
+    await DatabaseConnection.getInstance().connect();
+    const pairs = await MarketPair.find({});
 
     console.log(`Found ${polyPositions.length} poly pos, ${kalshiPositions.length} kalshi pos. Pairs: ${pairs.length}`);
 
@@ -38,5 +40,6 @@ async function testMatch() {
             if (exist) console.log(`Kalshi fallback -> exists but position is ${exist.position}`);
         }
     }
+    await DatabaseConnection.getInstance().disconnect();
 }
 testMatch();

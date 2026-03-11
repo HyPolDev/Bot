@@ -3,6 +3,8 @@ import cliProgress from 'cli-progress';
 import path from 'path';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import { DatabaseConnection } from '../db/connection.js';
+import { MarketPair } from '../db/models/MarketPair.js';
 
 dotenv.config({ override: true });
 
@@ -142,7 +144,6 @@ ALIGNMENT MAPPING:
 async function run() {
     const DATA_DIR = path.join(process.cwd(), 'data');
     const inputFile = path.join(DATA_DIR, 'candidate_market_groups.json');
-    const outputFile = path.join(DATA_DIR, 'market_pairs.json');
     const logsFile = path.join(DATA_DIR, 'llm_responses.json');
 
     if (!fs.existsSync(inputFile)) {
@@ -156,6 +157,8 @@ async function run() {
     if (candidates.length === 0) return;
 
     const ai = buildOpenAI();
+
+    await DatabaseConnection.getInstance().connect();
 
     console.log(`\nStarting OpenAI verification for ${candidates.length} candidate pairs...`);
     console.log(`Model: gpt-5-nano | Concurrency: ${MAX_CONCURRENT_REQUESTS} floating workers`);
@@ -175,7 +178,7 @@ async function run() {
     const activePromises = new Set<Promise<void>>();
 
     for (const pair of candidates) {
-        const worker = askLLM(ai, pair.polyMarket, pair.kalshiMarket).then((res) => {
+        const worker = askLLM(ai, pair.polyMarket, pair.kalshiMarket).then(async (res) => {
             processedCount++;
 
             llmLogs.push({
@@ -186,11 +189,28 @@ async function run() {
 
             if (res.alignment === 1) {
                 validatedPairs.push({ ...pair, outcomeAlignment: 1 });
+                const pairId = `${pair.kalshiMarket.internal_id}+${pair.polyMarket.internal_id}`;
+                await MarketPair.findOneAndUpdate(
+                    { pairId },
+                    {
+                        $set: {
+                            kalshiMarket: pair.kalshiMarket,
+                            polyMarket: pair.polyMarket,
+                            score: pair.score,
+                            outcomeAlignment: 1,
+                            metrics: {
+                                last_updated: new Date(),
+                                s_history: { PolyYes_kalshiNo: [], PolyNoKalshiYes: [] },
+                                expected_annualized_return: null
+                            }
+                        }
+                    },
+                    { upsert: true }
+                );
             }
 
             bar.update(processedCount, { confirmed: validatedPairs.length });
 
-            fs.writeFileSync(outputFile, JSON.stringify(validatedPairs, null, 2));
             fs.writeFileSync(logsFile, JSON.stringify(llmLogs, null, 2));
         });
 
@@ -212,6 +232,7 @@ async function run() {
 
     console.log(`\n✓ Validation complete.`);
     console.log(`  Total strict matches (1): ${validatedPairs.length}`);
+    await DatabaseConnection.getInstance().disconnect();
 }
 
 run();

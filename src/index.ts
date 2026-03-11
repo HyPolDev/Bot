@@ -10,6 +10,8 @@ import { LiveEngine } from './execution/live_engine.js';
 import { PolyClient } from './execution/poly_client.js';
 import { KalshiClient } from './execution/kalshi_client.js';
 import readline from 'readline';
+import { DatabaseConnection } from './db/connection.js';
+import { MarketPair } from './db/models/MarketPair.js';
 
 dotenv.config({ override: true });
 
@@ -54,19 +56,20 @@ async function bootSystem() {
         console.log(`\n[System] 🛡️ PAPER SIMULATION ACTIVE 🛡️`);
     }
 
-    const pairsFile = path.join(process.cwd(), 'data/market_pairs.json');
-    if (!fs.existsSync(pairsFile)) {
-        console.error(`[Error] ${pairsFile} not found.`);
+    await DatabaseConnection.getInstance().connect();
+    const dbPairs = await MarketPair.find({});
+    
+    if (dbPairs.length === 0) {
+        console.log("[System] No pairs found in database to monitor.");
         return;
     }
 
-    const rawData = fs.readFileSync(pairsFile, 'utf-8');
-    const pairs: CandidatePair[] = JSON.parse(rawData);
-
-    if (pairs.length === 0) {
-        console.log("[System] No pairs found to monitor.");
-        return;
-    }
+    const pairs: CandidatePair[] = dbPairs.map((doc: any) => ({
+        polyMarket: doc.polyMarket,
+        kalshiMarket: doc.kalshiMarket,
+        score: doc.score,
+        outcomeAlignment: doc.outcomeAlignment as 1 | -1
+    }));
 
     // --- Initialize Global State Singletons ---
     const portfolio = new PortfolioManager(INITIAL_POLY_CASH, INITIAL_KALSHI_CASH);
