@@ -30,8 +30,9 @@ export class CLI {
         this.managers = managers;
         this.portfolio = portfolio;
 
-        // Immediately resolve any ledger-recovered positions against the natively launched managers
-        this.portfolio.relinkRecoveredPositions(this.managers);
+        if (process.env.PAPER_TRADE == 'false') {
+            this.portfolio.relinkRecoveredPositions(this.managers);
+        }
 
         this.setupKeyboardListeners();
 
