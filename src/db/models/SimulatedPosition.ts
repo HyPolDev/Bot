@@ -2,8 +2,9 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ISimulatedPosition extends Document {
     pairId: string;
+    marketQuestion: string;
     state: 'open' | 'closed';
-    type: 'YesPoly_NoKalshi' | 'NoPoly_YesKalshi';
+    type: string;
     averagePolyPrice: number;
     polymarketQuantity: number;
     averageKalshiPrice: number;
@@ -15,6 +16,7 @@ export interface ISimulatedPosition extends Document {
 
 const SimulatedPositionSchema: Schema = new Schema({
     pairId: { type: String, required: true },
+    marketQuestion: { type: String, required: true, default: "Simulated Market" },
     state: {
         type: String,
         enum: ['open', 'closed'],
@@ -22,7 +24,6 @@ const SimulatedPositionSchema: Schema = new Schema({
     },
     type: {
         type: String,
-        enum: ['YesPoly_NoKalshi', 'NoPoly_YesKalshi'],
         required: true
     },
     averagePolyPrice: { type: Number, required: true },
@@ -35,5 +36,11 @@ const SimulatedPositionSchema: Schema = new Schema({
 }, {
     timestamps: true
 });
+
+// Guarantee that only one "open" position can exist per pairId in the database, preventing race-condition duplicates
+SimulatedPositionSchema.index(
+    { pairId: 1, state: 1 }, 
+    { unique: true, partialFilterExpression: { state: 'open' } }
+);
 
 export const SimulatedPosition = mongoose.model<ISimulatedPosition>('SimulatedPosition', SimulatedPositionSchema);

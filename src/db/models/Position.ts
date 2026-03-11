@@ -2,8 +2,9 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IPosition extends Document {
     pairId: string;
+    marketQuestion: string;
     state: 'open' | 'closed';
-    type: 'YesPoly_NoKalshi' | 'NoPoly_YesKalshi';
+    type: string;
     averagePolyPrice: number;
     polymarketQuantity: number;
     averageKalshiPrice: number;
@@ -15,6 +16,7 @@ export interface IPosition extends Document {
 
 const PositionSchema: Schema = new Schema({
     pairId: { type: String, required: true },
+    marketQuestion: { type: String, required: true },
     state: {
         type: String,
         enum: ['open', 'closed'],
@@ -22,7 +24,6 @@ const PositionSchema: Schema = new Schema({
     },
     type: {
         type: String,
-        enum: ['YesPoly_NoKalshi', 'NoPoly_YesKalshi'],
         required: true
     },
     averagePolyPrice: { type: Number, required: true },

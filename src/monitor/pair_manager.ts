@@ -5,6 +5,7 @@ import { RiskManager } from '../portfolio/risk_manager.js';
 import { LiveEngine } from '../execution/live_engine.js'; // <-- 1. IMPORT ADDED
 import { logger } from '../utils/logger.js';
 import { Settings } from '../db/models/Settings.js';
+import { SimulatedTrade } from '../db/models/SimulatedTrade.js';
 import * as fs from 'fs';
 
 export interface UnifiedMarket {
@@ -370,6 +371,16 @@ export class PairManager {
                 this.pairId, this.pairData.polyMarket.market_question, type,
                 realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap, realSweep.totalKalshiFees
             );
+
+            SimulatedTrade.create({
+                pairId: this.pairId,
+                marketQuestion: this.pairData.polyMarket.market_question,
+                type: 'buy',
+                polyQuantity: realSweep.size,
+                kalshiQuantity: realSweep.size,
+                averagePolyPrice: realSweep.polyVwap,
+                averageKalshiPrice: realSweep.kalshiVwap + (realSweep.totalKalshiFees / realSweep.size)
+            }).catch(e => logger.error(`[PairManager] Error persisting SimulatedTrade to DB: ${e.message}`));
         }
 
         const msg = `
@@ -508,6 +519,16 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
                     realSweep.polyVwap, realSweep.kalshiVwap,
                     realSweep.totalKalshiFees
                 );
+
+                SimulatedTrade.create({
+                    pairId: this.pairId,
+                    marketQuestion: this.pairData.polyMarket.market_question,
+                    type: 'sell',
+                    polyQuantity: realSweep.size,
+                    kalshiQuantity: realSweep.size,
+                    averagePolyPrice: realSweep.polyVwap,
+                    averageKalshiPrice: realSweep.kalshiVwap - (realSweep.totalKalshiFees / realSweep.size) // Fees subtract from seller exit revenue
+                }).catch(e => logger.error(`[PairManager] Error persisting SimulatedTrade (Exit) to DB: ${e.message}`));
             } else {
                 realizedBidStr = `${realizedBidVwap.toFixed(3)} (TOO LOW)`;
                 successFlag = "⚠️ SLIPPED (EXIT ABORTED to avoid loss)";

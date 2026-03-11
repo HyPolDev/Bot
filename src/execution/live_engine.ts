@@ -2,6 +2,7 @@ import { ExecutionPayload, ExecutionReceipt } from './types.js';
 import { PolyClient } from './poly_client.js';
 import { KalshiClient } from './kalshi_client.js';
 import { logger } from '../utils/logger.js';
+import { Trade } from '../db/models/Trade.js';
 
 // Assume PortfolioManager can be injected or imported. Using basic logging for now.
 // import { PortfolioManager } from '../portfolio/portfolio_manager.js';
@@ -202,7 +203,6 @@ export class LiveEngine {
                             kalshiFeeAmount
                         );
                     } else {
-                        // It's a SELL order, so we CLOSE the position to realize profits
                         this.portfolioManager.closePosition(
                             payload.pairId,
                             finalSize,
@@ -211,6 +211,17 @@ export class LiveEngine {
                             kalshiFeeAmount
                         );
                     }
+
+                    // Asynchronously Push to the Physical DB Trade Ledger
+                    Trade.create({
+                        pairId: payload.pairId,
+                        marketQuestion: payload.marketQuestion,
+                        type: payload.isEntry ? 'buy' : 'sell',
+                        polyQuantity: finalSize,
+                        kalshiQuantity: finalSize,
+                        averagePolyPrice: polyPrice,
+                        averageKalshiPrice: kalshiPrice + (kalshiFeeAmount / finalSize) // Bake the fee slippage into the true Kalshi fill price
+                    }).catch(e => logger.error(`[LIVE ENGINE] Error persisting Trade to DB: ${e.message}`));
                 }
 
                 // Fetch the true physical state directly from the exchanges to correct any precision or fee slippage

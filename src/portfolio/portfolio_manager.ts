@@ -308,6 +308,7 @@ export class PortfolioManager {
             this.polyCash -= polyCost;
             this.kalshiCash -= (kalshiCost + kalshiFees); // FIX: Deduct the fee from the wallet!
 
+            this.persistSimulationOpen(pos, totalCost, kalshiFees);
             return;
         }
 
@@ -331,28 +332,25 @@ export class PortfolioManager {
         try {
             const settings = await Settings.findOne();
             if (settings && settings.isPaperTrading) {
-                let dbPos = await SimulatedPosition.findOne({ pairId: pos.pairId, state: 'open' });
-                if (dbPos) {
-                    dbPos.polymarketQuantity = pos.size;
-                    dbPos.kalshiQuantity = pos.size;
-                    dbPos.averagePolyPrice = pos.polyEntryPrice;
-                    dbPos.averageKalshiPrice = pos.kalshiEntryPrice;
-                    dbPos.exitFees += kalshiFees;
-                    await dbPos.save();
-                } else {
-                    await SimulatedPosition.create({
-                        pairId: pos.pairId,
-                        state: 'open',
-                        type: pos.type,
-                        averagePolyPrice: pos.polyEntryPrice,
-                        polymarketQuantity: pos.size,
-                        averageKalshiPrice: pos.kalshiEntryPrice,
-                        kalshiQuantity: pos.size,
-                        exitFees: kalshiFees,
-                        expiringDate: new Date(Date.now() + (settings.expirationWindow * 30 * 24 * 60 * 60 * 1000)), // Approx default based on settings
-                        expectedAnnualizedReturn: 0 // Default, can be calculated dynamically later
-                    });
-                }
+                await SimulatedPosition.findOneAndUpdate(
+                    { pairId: pos.pairId, state: 'open' },
+                    {
+                        $set: {
+                            marketQuestion: pos.marketQuestion,
+                            type: pos.type,
+                            averagePolyPrice: pos.polyEntryPrice,
+                            polymarketQuantity: pos.size,
+                            averageKalshiPrice: pos.kalshiEntryPrice,
+                            kalshiQuantity: pos.size
+                        },
+                        $inc: { exitFees: kalshiFees },
+                        $setOnInsert: {
+                            expiringDate: new Date(Date.now() + (settings.expirationWindow * 30 * 24 * 60 * 60 * 1000)),
+                            expectedAnnualizedReturn: 0
+                        }
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
             }
         } catch (error) {
             logger.error(`[Portfolio] Error saving SimulatedPosition to DB:`, error);
