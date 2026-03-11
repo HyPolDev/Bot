@@ -12,6 +12,7 @@ import { KalshiClient } from './execution/kalshi_client.js';
 import readline from 'readline';
 import { DatabaseConnection } from './db/connection.js';
 import { MarketPair } from './db/models/MarketPair.js';
+import { Settings } from './db/models/Settings.js';
 
 dotenv.config({ override: true });
 
@@ -38,11 +39,21 @@ async function bootSystem() {
 
     rl.close();
 
-    let INITIAL_POLY_CASH = 5000;
-    let INITIAL_KALSHI_CASH = 5000;
+    let INITIAL_POLY_CASH = 0;
+    let INITIAL_KALSHI_CASH = 0;
+
+    // Connect to DB as early as possible because mode switching now requires it
+    await DatabaseConnection.getInstance().connect();
+
+    let settings = await Settings.findOne();
+    if (!settings) {
+        settings = await Settings.create({}); // Creates with schema defaults
+        console.log(`[System] Initialized new Settings record in database.`);
+    }
 
     if (mode === 'LIVE') {
-        process.env.PAPER_TRADE = "false";
+        settings.isPaperTrading = false;
+        await settings.save();
         console.log(`\n[System] ⚠️ LIVE DEPLOYMENT AUTHORIZED ⚠️`);
         console.log(`[System] Fetching live wallets from exchanges...`);
 
@@ -52,11 +63,11 @@ async function bootSystem() {
         INITIAL_POLY_CASH = await polyClient.getCollateralBalance();
         INITIAL_KALSHI_CASH = await kalshiClient.getBalance();
     } else {
-        process.env.PAPER_TRADE = "true";
+        settings.isPaperTrading = true;
+        await settings.save();
         console.log(`\n[System] 🛡️ PAPER SIMULATION ACTIVE 🛡️`);
     }
 
-    await DatabaseConnection.getInstance().connect();
     const dbPairs = await MarketPair.find({});
     
     if (dbPairs.length === 0) {
@@ -73,6 +84,8 @@ async function bootSystem() {
 
     // --- Initialize Global State Singletons ---
     const portfolio = new PortfolioManager(INITIAL_POLY_CASH, INITIAL_KALSHI_CASH);
+    await portfolio.initializePaperTrading(); // Load simulated positions/balances if paper trading
+    
     const liveEngine = new LiveEngine(portfolio);
     const riskManager = new RiskManager(portfolio);
 
@@ -102,8 +115,12 @@ async function bootSystem() {
 
     // Wire up the physical position tracker to know which managers map to which tokens/tickers
     portfolio.setManagers(activeManagers);
-    console.log(`[System] Synchronizing physical exchange positions...`);
-    await portfolio.syncBalances();
+    if (!settings.isPaperTrading) {
+        console.log(`[System] Synchronizing physical exchange positions...`);
+        await portfolio.syncBalances();
+    } else {
+        console.log(`[System] Simulation ready. Skipped physical sync.`);
+    }
 
     // Enable the engine to trade now that books are loaded
     liveEngine.isSystemReady = true;

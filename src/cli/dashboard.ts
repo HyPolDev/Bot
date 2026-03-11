@@ -1,6 +1,7 @@
 import readline from 'readline';
 import { PairManager } from '../monitor/pair_manager.js';
 import { PortfolioManager, Position } from '../portfolio/portfolio_manager.js';
+import { Settings } from '../db/models/Settings.js';
 
 enum ViewState {
     HOME,
@@ -25,19 +26,31 @@ export class CLI {
     private readonly POSITIONS_PAGE_SIZE: number = 5;
 
     private refreshInterval: NodeJS.Timeout | null = null;
+    private isPaperTrading: boolean = true; // Cached from DB
 
     constructor(managers: PairManager[], portfolio: PortfolioManager) {
         this.managers = managers;
         this.portfolio = portfolio;
 
-        if (process.env.PAPER_TRADE == 'false') {
-            this.portfolio.relinkRecoveredPositions(this.managers);
-        }
-
+        this.initSettings();
         this.setupKeyboardListeners();
 
         // Start the UI render loop (updates once per second for static screens)
         this.startRenderLoop();
+    }
+
+    private async initSettings() {
+        try {
+            const settings = await Settings.findOne();
+            if (settings) {
+                this.isPaperTrading = settings.isPaperTrading;
+                if (!this.isPaperTrading) {
+                    this.portfolio.relinkRecoveredPositions(this.managers);
+                }
+            }
+        } catch (error) {
+            // Fallback gracefully
+        }
     }
 
     public showMenu() {
@@ -160,8 +173,7 @@ export class CLI {
         const pnl = this.portfolio.getRealizedPnL();
         const positions = this.portfolio.getOpenPositions().length;
 
-        const isPaper = process.env.PAPER_TRADE !== 'false';
-        const modeLabel = isPaper
+        const modeLabel = this.isPaperTrading
             ? `\x1b[32m[🛡️  PAPER SIMULATION ACTIVE]\x1b[0m`
             : `\x1b[31m[⚠️  LIVE DEPLOYMENT AUTHORIZED ⚠️ ]\x1b[0m`;
 

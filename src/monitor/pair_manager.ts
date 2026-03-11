@@ -4,6 +4,7 @@ import { PortfolioManager } from '../portfolio/portfolio_manager.js';
 import { RiskManager } from '../portfolio/risk_manager.js';
 import { LiveEngine } from '../execution/live_engine.js'; // <-- 1. IMPORT ADDED
 import { logger } from '../utils/logger.js';
+import { Settings } from '../db/models/Settings.js';
 import * as fs from 'fs';
 
 export interface UnifiedMarket {
@@ -52,8 +53,16 @@ export class PairManager {
     private lastArbitrageTime: number = 0;
     private readonly ARBITRAGE_COOLDOWN_MS: number = 10000;
 
-    private readonly PAPER_TRADE_MODE: boolean;
-    private readonly SIMULATED_LATENCY_MS: number = 1000;
+    private async getSettings() {
+        try {
+            const settings = await Settings.findOne();
+            if (settings) return settings;
+        } catch (error) {
+            logger.error(`[PairManager] Error fetching settings:`, error);
+        }
+        // Fallback defaults
+        return { isPaperTrading: true, simulatedLatency: 1000, arbitrageCooldown: 10000 };
+    }
 
     // <-- 4. CONSTRUCTOR UPDATED TO ACCEPT LIVE ENGINE
     constructor(pair: CandidatePair, portfolio: PortfolioManager, risk: RiskManager, liveEngine: LiveEngine) {
@@ -62,7 +71,6 @@ export class PairManager {
         this.portfolio = portfolio;
         this.risk = risk;
         this.liveEngine = liveEngine;
-        this.PAPER_TRADE_MODE = process.env.PAPER_TRADE !== "false";
     }
 
     public async start() {
@@ -227,14 +235,15 @@ export class PairManager {
         };
     }
 
-    private evaluateEntry() {
+    private async evaluateEntry() {
         if (!this.liveEngine.isSystemReady) return;
         if (!this.latestKalshiBook) return;
         // Global Safe Execution Guard
         if ((this.portfolio as any).isPairBanned && (this.portfolio as any).isPairBanned(this.pairId)) return;
 
+        const settings = await this.getSettings();
         const now = Date.now();
-        if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
+        if (now - this.lastArbitrageTime < settings.arbitrageCooldown) return;
 
         const alignment = this.pairData.outcomeAlignment;
 
@@ -259,7 +268,7 @@ export class PairManager {
         }
     }
 
-    private checkAndTriggerEntry(type: string, polyAsks: any[], kalshiAsks: any[]) {
+    private async checkAndTriggerEntry(type: string, polyAsks: any[], kalshiAsks: any[]) {
         const sweep = this.calculateSweep(polyAsks, kalshiAsks, true);
 
         if (sweep.size > 0) {
@@ -268,9 +277,10 @@ export class PairManager {
             );
 
             if (approvedSize > 0) {
+                const settings = await this.getSettings();
                 this.lastArbitrageTime = Date.now();
-                if (this.PAPER_TRADE_MODE) {
-                    this.executePaperTrade(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap);
+                if (settings.isPaperTrading) {
+                    this.executePaperEntry(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap, settings.simulatedLatency);
                 } else {
                     // pre-execution explicit guard checking real simulated/live budget 
                     const polyRequiredCost = sweep.polyVwap * approvedSize;
@@ -304,10 +314,10 @@ export class PairManager {
         }
     }
 
-    private async executePaperTrade(type: string, approvedSize: number, detectedSpread: number) {
+    private async executePaperEntry(type: string, approvedSize: number, detectedSpread: number, latencyMs: number) {
         // [Existing paper trade logic remains identical]
         const timeDetected = new Date().toISOString();
-        await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
+        await new Promise(resolve => setTimeout(resolve, latencyMs));
 
         let execPolyAsks: any[] = []; let execKalshiAsks: any[] = [];
         let polyKey = ''; let kalshiKey = '';
@@ -368,7 +378,7 @@ export class PairManager {
 Market: ${this.pairData.polyMarket.market_question.substring(0, 80)}...
 Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
 
---- EXECUTION (T+${this.SIMULATED_LATENCY_MS}ms) ---
+--- EXECUTION (T+${latencyMs}ms) ---
 -> REALIZED VWAP: ${realizedSpreadStr}  ${successFlag}
 -> FILLED SIZE: ${realSweep.size}
 ==================================================\n`;
@@ -376,15 +386,16 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
 
-    private evaluateExit() {
+    private async evaluateExit() {
         const position = this.portfolio.getPosition(this.pairId);
         if (!position || !this.latestKalshiBook || !this.liveEngine.isSystemReady) return;
 
         // Global Safe Execution Guard
         if ((this.portfolio as any).isPairBanned && (this.portfolio as any).isPairBanned(this.pairId)) return;
 
+        const settings = await this.getSettings();
         const now = Date.now();
-        if (now - this.lastArbitrageTime < this.ARBITRAGE_COOLDOWN_MS) return;
+        if (now - this.lastArbitrageTime < settings.arbitrageCooldown) return;
 
         let targetPolyBids: any[] = []; let targetKalshiBids: any[] = [];
 
@@ -411,8 +422,9 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
 
         if (sweep.size > 0) {
             this.lastArbitrageTime = now;
-            if (this.PAPER_TRADE_MODE) {
-                this.executePaperExit(position, sweep.size, sweep.polyVwap + sweep.kalshiVwap);
+            const settings = await this.getSettings();
+            if (settings.isPaperTrading) {
+                this.executePaperExit(position, sweep.size, sweep.polyVwap + sweep.kalshiVwap, settings.simulatedLatency);
             } else {
                 // <-- 7. LIVE EXIT ROUTING
                 const polyAssetId = position.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
@@ -437,10 +449,10 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
         }
     }
 
-    private async executePaperExit(position: any, approvedExitSize: number, detectedSpread: number) {
+    private async executePaperExit(position: any, approvedExitSize: number, detectedSpread: number, latencyMs: number) {
         // [Existing paper exit logic remains identical]
         const timeDetected = new Date().toISOString();
-        await new Promise(resolve => setTimeout(resolve, this.SIMULATED_LATENCY_MS));
+        await new Promise(resolve => setTimeout(resolve, latencyMs));
 
         let execPolyBids: any[] = []; let execKalshiBids: any[] = [];
         let polyKey = ''; let kalshiKey = '';
@@ -508,7 +520,7 @@ Detection VWAP: ${detectedSpread.toFixed(3)} | Attempt Size: ${approvedSize}
 Market: ${this.pairData.polyMarket.market_question.substring(0, 80)}...
 Detection VWAP: ${detectedSpread.toFixed(3)} | Target Size: ${approvedExitSize}
 
---- EXECUTION (T+${this.SIMULATED_LATENCY_MS}ms) ---
+--- EXECUTION (T+${latencyMs}ms) ---
 -> REALIZED REVENUE VWAP: ${realizedBidStr}  ${successFlag}
 -> SOLD SIZE: ${realSweep.size}
 ==================================================\n`;

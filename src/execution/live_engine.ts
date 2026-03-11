@@ -27,15 +27,22 @@ export class LiveEngine {
         this.kalshiClient = new KalshiClient();
         this.portfolioManager = portfolioManager;
 
-        // Attach physical exchange clients to the ledger to prevent api drift
-        if (this.portfolioManager && typeof this.portfolioManager.attachExchangeClients === 'function') {
-            this.portfolioManager.attachExchangeClients(this.polyClient, this.kalshiClient);
-        }
+        this.initExchangeClients();
 
         this.maxPositionSize = parseInt(process.env.MAX_POSITION_SIZE || '50', 10);
 
         // Start the background execution queue processor
         setInterval(() => this.processQueue(), 100);
+    }
+
+    private async initExchangeClients() {
+        try {
+            if (this.portfolioManager && typeof this.portfolioManager.attachExchangeClients === 'function') {
+                await this.portfolioManager.attachExchangeClients(this.polyClient, this.kalshiClient);
+            }
+        } catch (error) {
+            logger.error(`[LiveEngine] Failed to attach exchange clients:`, error);
+        }
     }
 
     public queueOrder(payload: ExecutionPayload): void {

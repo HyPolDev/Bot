@@ -1,5 +1,6 @@
-import * as fs from 'fs';
 import { logger } from '../utils/logger.js';
+import { SimulatedPosition } from '../db/models/SimulatedPosition.js';
+import { Settings } from '../db/models/Settings.js';
 
 export interface Position {
     pairId: string;
@@ -38,13 +39,58 @@ export class PortfolioManager {
         logger.info(`[Portfolio] Initialized statically. Awaiting Live Sync...`);
     }
 
-    public attachExchangeClients(polyClient: any, kalshiClient: any) {
+    public async attachExchangeClients(polyClient: any, kalshiClient: any) {
         this.polyClient = polyClient;
         this.kalshiClient = kalshiClient;
+
+        const settings = await Settings.findOne();
+        if (settings && settings.isPaperTrading) {
+            logger.info(`[Portfolio] Paper Trading active. Skipping live physical balance and position sync intervals.`);
+            return;
+        }
 
         // Immediately sync and then sync every 60 seconds
         this.syncBalances();
         setInterval(() => this.syncBalances(), 60000);
+    }
+
+    public async initializePaperTrading() {
+        try {
+            const settings = await Settings.findOne();
+            if (settings && settings.isPaperTrading) {
+                logger.info(`[Portfolio] Paper Trading Enabled. Fetching simulated balances and positions...`);
+
+                // Hardcoded initial simulated balances (or could be moved to Settings later)
+                this.polyCash = 1000;
+                this.kalshiCash = 1000;
+
+                const dbPositions = await SimulatedPosition.find({ state: 'open' });
+                for (const pos of dbPositions) {
+                    const totalCost = (pos.averagePolyPrice * pos.polymarketQuantity) +
+                        (pos.averageKalshiPrice * pos.kalshiQuantity) +
+                        pos.exitFees;
+
+                    this.polyCash -= (pos.averagePolyPrice * pos.polymarketQuantity);
+                    this.kalshiCash -= (pos.averageKalshiPrice * pos.kalshiQuantity + pos.exitFees);
+
+                    this.openPositions.set(pos.pairId, {
+                        pairId: pos.pairId,
+                        marketQuestion: "Simulated Market (Restored)", // We don't save marketQuestion in DB currently
+                        type: pos.type as string,
+                        size: pos.polymarketQuantity, // Assuming sizes match
+                        polyEntryPrice: pos.averagePolyPrice,
+                        kalshiEntryPrice: pos.averageKalshiPrice,
+                        polyCost: pos.averagePolyPrice * pos.polymarketQuantity,
+                        kalshiCost: pos.averageKalshiPrice * pos.kalshiQuantity + pos.exitFees,
+                        totalCost,
+                        timestamp: Date.now() // Could use createdAt from DB
+                    });
+                }
+                logger.info(`[Portfolio] Restored ${dbPositions.length} simulated positions. Simulated Balances -> Poly: $${this.polyCash.toFixed(2)} | Kalshi: $${this.kalshiCash.toFixed(2)}`);
+            }
+        } catch (error) {
+            logger.error(`[Portfolio] Error initializing paper trading state from DB:`, error);
+        }
     }
 
     public relinkRecoveredPositions(managers: any[]) {
@@ -262,7 +308,6 @@ export class PortfolioManager {
             this.polyCash -= polyCost;
             this.kalshiCash -= (kalshiCost + kalshiFees); // FIX: Deduct the fee from the wallet!
 
-            this.logLedgerEvent(`ADD`, pos, 0, 0, size, totalCost);
             return;
         }
 
@@ -279,7 +324,39 @@ export class PortfolioManager {
         this.polyCash -= polyCost;
         this.kalshiCash -= (kalshiCost + kalshiFees);
 
-        this.logLedgerEvent(`OPEN`, newPosition, 0, 0, size, totalCost);
+        this.persistSimulationOpen(newPosition, totalCost, kalshiFees);
+    }
+
+    private async persistSimulationOpen(pos: Position, totalCost: number, kalshiFees: number) {
+        try {
+            const settings = await Settings.findOne();
+            if (settings && settings.isPaperTrading) {
+                let dbPos = await SimulatedPosition.findOne({ pairId: pos.pairId, state: 'open' });
+                if (dbPos) {
+                    dbPos.polymarketQuantity = pos.size;
+                    dbPos.kalshiQuantity = pos.size;
+                    dbPos.averagePolyPrice = pos.polyEntryPrice;
+                    dbPos.averageKalshiPrice = pos.kalshiEntryPrice;
+                    dbPos.exitFees += kalshiFees;
+                    await dbPos.save();
+                } else {
+                    await SimulatedPosition.create({
+                        pairId: pos.pairId,
+                        state: 'open',
+                        type: pos.type,
+                        averagePolyPrice: pos.polyEntryPrice,
+                        polymarketQuantity: pos.size,
+                        averageKalshiPrice: pos.kalshiEntryPrice,
+                        kalshiQuantity: pos.size,
+                        exitFees: kalshiFees,
+                        expiringDate: new Date(Date.now() + (settings.expirationWindow * 30 * 24 * 60 * 60 * 1000)), // Approx default based on settings
+                        expectedAnnualizedReturn: 0 // Default, can be calculated dynamically later
+                    });
+                }
+            }
+        } catch (error) {
+            logger.error(`[Portfolio] Error saving SimulatedPosition to DB:`, error);
+        }
     }
 
     public closePosition(
@@ -317,24 +394,29 @@ export class PortfolioManager {
         }
 
         const logPosition = { ...position, size: actualExitSize };
-        this.logLedgerEvent(`CLOSE`, logPosition, pnl, totalRevenue);
+        this.persistSimulationClose(pairId, actualExitSize, position.size);
     }
 
-    private logLedgerEvent(action: string, position: Position, pnl: number = 0, revenue: number = 0, addedSize: number = 0, addedCost: number = 0) {
-        const time = new Date().toISOString();
-        let msg = `[${time}] LEDGER ${action}: ${position.marketQuestion.substring(0, 50)}...\n`;
-
-        if (action === 'OPEN' || action === 'ADD') {
-            msg += `  Action Size: +${addedSize} | Action Cost: $${addedCost.toFixed(2)} | Type: ${position.type}\n`;
-            msg += `  Total Position Size: ${position.size} | Avg Entry: ${(position.polyEntryPrice + position.kalshiEntryPrice).toFixed(3)}\n`;
-            msg += `  New Balances: Poly $${this.polyCash.toFixed(2)} | Kalshi $${this.kalshiCash.toFixed(2)}\n`;
-        } else {
-            msg += `  Size: ${position.size} | Type: ${position.type}\n`;
-            msg += `  Exit Revenue: $${revenue.toFixed(2)} | PnL: $${pnl.toFixed(2)}\n`;
-            msg += `  Total Equity: $${this.getTotalEquity().toFixed(2)}\n`;
+    private async persistSimulationClose(pairId: string, exitSize: number, remainingSize: number) {
+        try {
+            const settings = await Settings.findOne();
+            if (settings && settings.isPaperTrading) {
+                const dbPos = await SimulatedPosition.findOne({ pairId, state: 'open' });
+                if (dbPos) {
+                    if (remainingSize <= 0) {
+                        dbPos.state = 'closed';
+                        await dbPos.save();
+                    } else {
+                        // Partial close
+                        dbPos.polymarketQuantity = remainingSize;
+                        dbPos.kalshiQuantity = remainingSize;
+                        await dbPos.save();
+                    }
+                }
+            }
+        } catch (error) {
+            logger.error(`[Portfolio] Error closing SimulatedPosition in DB:`, error);
         }
-        msg += `--------------------------------------------------\n`;
-
-        fs.appendFileSync('portfolio_ledger.txt', msg, 'utf8');
     }
+
 }

@@ -13,19 +13,13 @@ export interface ISettings extends Document {
 const SettingsSchema = new Schema({
     isPaperTrading: { type: Boolean, required: true, default: true },
     expirationWindow: { type: Number, required: true, default: 6 },
-    vectorSearchThreshold: { 
-        type: Number, 
-        required: true, 
-        default: 0.9,
-        min: 0,
-        max: 1
-    },
+    vectorSearchThreshold: { type: Number, required: true, default: 0.9 },
     arbitrageCooldown: { type: Number, required: true, default: 10000 },
     simulatedLatency: { type: Number, required: true, default: 1000 },
     entryThreshold: { type: Number, required: true, default: 0.98 },
     exitThreshold: { type: Number, required: true, default: 0.98 }
-}, { 
-    timestamps: true 
+}, {
+    timestamps: true
 });
 
 export const Settings = mongoose.model<ISettings>('Settings', SettingsSchema);
