@@ -8,6 +8,7 @@
   "main": "index.ts",
   "scripts": {
     "start": "npx tsx src/index.ts",
+    "reset-sim": "npx tsx scripts/reset_sim.ts",
     "test-execution": "npx tsx src/execution/test_execution.ts",
     "test-risk": "npx tsx src/test/test_risk_math.ts",
     "test-balances": "npx tsx src/test/test_balances.ts",
