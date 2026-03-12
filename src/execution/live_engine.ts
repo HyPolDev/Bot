@@ -61,11 +61,11 @@ export class LiveEngine {
         this.lastExecutionTime = now;
 
         try {
-            // Priority Sort: (1) Spread Margin [Higher is better] (2) Available Liquidity [Higher is better]
+            // Priority Sort: (1) Expected Annualized Return [Higher is better] (2) Available Liquidity [Higher is better]
             this.tradeQueue.sort((a, b) => {
-                const marginA = a.spreadMargin || 0;
-                const marginB = b.spreadMargin || 0;
-                if (marginB !== marginA) return marginB - marginA;
+                const earA = a.expectedEAR || 0;
+                const earB = b.expectedEAR || 0;
+                if (earB !== earA) return earB - earA;
 
                 const liqA = a.availableLiquidity || 0;
                 const liqB = b.availableLiquidity || 0;
@@ -272,21 +272,9 @@ export class LiveEngine {
     }
 
     private calculateKalshiTakerFee(executedPrice: number, size: number): number {
-        // Kalshi Dynamic Taker Fee Calculation (Post-execution)
-        // Let's assume price is in dollars (e.g. 0.52). Convert to cents for calculation.
-        const priceCents = Math.round(executedPrice * 100);
-
-        let feePerContractCents = 0;
-        // Typically, Kalshi taker limit fees are around ~7% of the smaller probability (price or 100-price)
-        // or a flat minimal fee. This varies slightly with new tiers. 
-        // Using a standard placeholder calculation:
-        const minProb = Math.min(priceCents, 100 - priceCents);
-        feePerContractCents = Math.floor(minProb * 0.07); // ~7% of the implied probability 
-
-        // Cap or specifics can be added here
-
-        const totalFeeCents = feePerContractCents * size;
-        return totalFeeCents / 100; // Return in dollars
+        // Canonical Kalshi taker fee: ceil(0.07 * totalContracts * P * (1-P))
+        // Applied once to the full block — consistent with entry-side fee calculation in PairManager.
+        return Math.ceil(0.07 * size * executedPrice * (1 - executedPrice) * 100) / 100;
     }
 
     private triggerEmergencyHedge(exchange: 'Polymarket' | 'Kalshi', assetIdentifier: string, originalEntry: boolean, size: number, kalshiSide: 'yes' | 'no' = 'yes') {

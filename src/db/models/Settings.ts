@@ -6,8 +6,7 @@ export interface ISettings extends Document {
     vectorSearchThreshold: number; // between 0 and 1
     arbitrageCooldown: number; // in milliseconds
     simulatedLatency: number; // in milliseconds
-    entryThreshold: number;
-    exitThreshold: number;
+    minEarThreshold: number;  // minimum Expected Annualized Return to trigger entry (e.g. 0.15 = 15%)
 }
 
 const SettingsSchema = new Schema({
@@ -16,8 +15,7 @@ const SettingsSchema = new Schema({
     vectorSearchThreshold: { type: Number, required: true, default: 0.9 },
     arbitrageCooldown: { type: Number, required: true, default: 10000 },
     simulatedLatency: { type: Number, required: true, default: 1000 },
-    entryThreshold: { type: Number, required: true, default: 0.98 },
-    exitThreshold: { type: Number, required: true, default: 0.98 }
+    minEarThreshold: { type: Number, required: true, default: 0.15 },
 }, {
     timestamps: true
 });
