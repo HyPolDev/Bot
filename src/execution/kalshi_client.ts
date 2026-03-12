@@ -229,7 +229,11 @@ export class KalshiClient {
 
         try {
             const signature = this.sign(timestamp, 'GET', signaturePath);
-            const response = await fetch(`${this.baseUrl}${endpoint}`, {
+            const url = new URL(`${this.baseUrl}${endpoint}`);
+            // Request only non-zero positions if the API supports it
+            url.searchParams.set('count_filter', 'position');
+
+            const response = await fetch(url.toString(), {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json',
@@ -246,17 +250,26 @@ export class KalshiClient {
             }
 
             const data = await response.json();
-            const positions = data.market_positions || data.positions || [];
+            const rawPositions = data.market_positions || data.positions || data.event_positions || [];
 
-            return positions
-                .filter((p: any) => p.position !== 0)
-                .map((p: any) => ({
-                    ticker: p.ticker,
-                    position: p.position,
-                    market_exposure: p.market_exposure || 0,       // cents
-                    fees_paid: p.fees_paid || 0,                   // cents
-                    total_traded: p.total_traded || 0              // cents
-                }));
+            const toNum = (v: any) => {
+                const n = typeof v === 'string' ? Number(v) : Number(v);
+                return Number.isFinite(n) ? n : 0;
+            };
+
+            return rawPositions
+                .map((p: any) => {
+                    const position = toNum(p.position ?? p.position_fp ?? p.net_position ?? p.count ?? p.open_count ?? 0);
+                    const ticker = p.ticker ?? p.market_ticker ?? p.market?.ticker ?? p.event_ticker ?? '';
+                    return {
+                        ticker,
+                        position,
+                        market_exposure: toNum(p.market_exposure ?? p.market_exposure_dollars ?? p.exposure ?? 0),
+                        fees_paid: toNum(p.fees_paid ?? p.fees_paid_dollars ?? p.fees ?? 0),
+                        total_traded: toNum(p.total_traded ?? p.total_traded_cents ?? p.volume_traded ?? 0)
+                    };
+                })
+                .filter((p: any) => p.ticker && Number.isFinite(p.position) && p.position !== 0);
         } catch (error: any) {
             console.error(`[KalshiClient] getOpenPositions error:`, error.message);
             return [];

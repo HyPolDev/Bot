@@ -22,6 +22,22 @@ export class KalshiWS {
         this.connect();
     }
 
+    private normalizePrice(raw: any): number | null {
+        const n = typeof raw === 'string' ? Number(raw) : Number(raw);
+        if (!Number.isFinite(n)) return null;
+        // If price is already decimal (< 1), keep as-is. Otherwise treat as cents.
+        const dec = n > 1 ? n / 100 : n;
+        if (!Number.isFinite(dec)) return null;
+        if (dec < 0 || dec > 1) return null;
+        return Number(dec.toFixed(4));
+    }
+
+    private normalizeSize(raw: any): number | null {
+        const n = typeof raw === 'string' ? Number(raw) : Number(raw);
+        if (!Number.isFinite(n)) return null;
+        return n;
+    }
+
     private connect() {
         if (!this.isRunning) return;
 
@@ -74,15 +90,32 @@ export class KalshiWS {
                     this.kalshiBooks.yes.clear();
                     this.kalshiBooks.no.clear();
 
-                    (payload.msg.yes || []).forEach((b: any) => this.kalshiBooks.yes.set(b[0] / 100, b[1]));
-                    (payload.msg.no || []).forEach((b: any) => this.kalshiBooks.no.set(b[0] / 100, b[1]));
+                    const msg = payload.msg || {};
+                    const yesArr = msg.yes || msg.orderbook?.yes || msg.orderbook_fp?.yes_dollars || [];
+                    const noArr = msg.no || msg.orderbook?.no || msg.orderbook_fp?.no_dollars || [];
+
+                    yesArr.forEach((b: any) => {
+                        const price = this.normalizePrice(b[0]);
+                        const size = this.normalizeSize(b[1]);
+                        if (price === null || size === null) return;
+                        this.kalshiBooks.yes.set(price, size);
+                    });
+
+                    noArr.forEach((b: any) => {
+                        const price = this.normalizePrice(b[0]);
+                        const size = this.normalizeSize(b[1]);
+                        if (price === null || size === null) return;
+                        this.kalshiBooks.no.set(price, size);
+                    });
 
                     this.emitUpdate();
                 }
                 else if (payload.type === 'orderbook_delta') {
-                    const price = payload.msg.price / 100;
-                    const delta = payload.msg.delta;
-                    const sideStr = (payload.msg.side || "").toLowerCase();
+                    const price = this.normalizePrice(payload.msg?.price ?? payload.msg?.price_fp);
+                    const delta = this.normalizeSize(payload.msg?.delta ?? payload.msg?.delta_fp);
+                    const sideStr = (payload.msg?.side || "").toLowerCase();
+
+                    if (price === null || delta === null) return;
 
                     const targetMap = sideStr === 'yes' ? this.kalshiBooks.yes :
                         sideStr === 'no' ? this.kalshiBooks.no : null;
@@ -117,7 +150,12 @@ export class KalshiWS {
     private emitUpdate() {
         const deriveAsks = (oppositeBidsMap: Map<number, number>) => {
             return Array.from(oppositeBidsMap.entries())
-                .map(([price, size]) => ({ price: Number((1.00 - price).toFixed(2)), size }))
+                .map(([price, size]) => {
+                    const askPrice = Number((1.00 - price).toFixed(4));
+                    if (!Number.isFinite(askPrice) || askPrice < 0 || askPrice > 1) return null;
+                    return { price: askPrice, size };
+                })
+                .filter((v: any) => v !== null)
                 .sort((a, b) => a.price - b.price);
         };
 
