@@ -72,7 +72,6 @@ export class KalshiClient {
     public async placeAggressiveLimit(ticker: string, side: 'yes' | 'no', isEntry: boolean, size: number, maxVwap: number): Promise<ExecutionReceipt> {
         const timestamp = Date.now();
         const action = isEntry ? 'buy' : 'sell';
-        const yesPriceCents = Math.floor(maxVwap * 100);
         const clientOrderId = crypto.randomUUID();
 
         const endpoint = '/portfolio/orders';
@@ -93,10 +92,11 @@ export class KalshiClient {
                     action: action,
                     side: side,
                     ticker: ticker,
-                    count: size,
+                    count_fp: size, // CHANGED: Use count_fp for fractional support
                     client_order_id: clientOrderId,
                     type: 'limit',
-                    ...(side === 'yes' ? { yes_price: yesPriceCents } : { no_price: yesPriceCents }),
+                    // CHANGED: Send string-based dollar prices instead of integer cents
+                    ...(side === 'yes' ? { yes_price_dollars: maxVwap.toString() } : { no_price_dollars: maxVwap.toString() }),
                     time_in_force: 'fill_or_kill'
                 })
             });
@@ -120,8 +120,12 @@ export class KalshiClient {
                     exchange: 'Kalshi',
                     status: 'filled',
                     orderId: orderId,
-                    executedPrice: (orderInfo.yes_price || yesPriceCents) / 100,
-                    executedSize: orderInfo.actual_count || size
+                    // CHANGED: Parse the string dollar value natively, with a fallback
+                    executedPrice: orderInfo.yes_price_dollars
+                        ? parseFloat(orderInfo.yes_price_dollars)
+                        : (orderInfo.yes_price || Math.floor(maxVwap * 100)) / 100,
+                    // CHANGED: Check for actual_count_fp first
+                    executedSize: orderInfo.actual_count_fp || orderInfo.actual_count || size
                 };
             } else if (status === 'canceled') {
                 return {
@@ -170,9 +174,9 @@ export class KalshiClient {
                     action: action,
                     side: side,
                     ticker: ticker,
-                    count: size,
+                    count_fp: size, // CHANGED: Use count_fp for fractional support
                     client_order_id: clientOrderId,
-                    type: 'market' // Native market order type
+                    type: 'market'
                 })
             });
 
@@ -195,8 +199,9 @@ export class KalshiClient {
                     exchange: 'Kalshi',
                     status: 'filled',
                     orderId: orderId,
-                    executedPrice: 0, // Unfilled info natively until queried, but executed
-                    executedSize: orderInfo.actual_count || size
+                    executedPrice: 0,
+                    // CHANGED: Check for actual_count_fp first
+                    executedSize: orderInfo.actual_count_fp || orderInfo.actual_count || size
                 };
             } else if (status === 'canceled') {
                 return {
@@ -225,15 +230,14 @@ export class KalshiClient {
     public async getOpenPositions(): Promise<{ ticker: string, position: number, market_exposure: number, fees_paid: number, total_traded: number }[]> {
         const timestamp = Date.now();
         const endpoint = '/portfolio/positions';
-        const signaturePath = `/trade-api/v2${endpoint}`;
+        const query = '?count_filter=position'; // Define query explicitly
+        const signaturePath = `/trade-api/v2${endpoint}${query}`; // Include query in signature
 
         try {
             const signature = this.sign(timestamp, 'GET', signaturePath);
-            const url = new URL(`${this.baseUrl}${endpoint}`);
-            // Request only non-zero positions if the API supports it
-            url.searchParams.set('count_filter', 'position');
+            const url = `${this.baseUrl}${endpoint}${query}`; // Use the exact same path
 
-            const response = await fetch(url.toString(), {
+            const response = await fetch(url, {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json',

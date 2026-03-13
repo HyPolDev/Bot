@@ -160,7 +160,7 @@ export class PairManager {
      */
     private calculateSweep(
         polyLevels: any[], kalshiLevels: any[],
-        daysToExpiration: number, minEarThreshold: number,
+        daysToExpiration: number, minEarThreshold: number, expiringDate?: Date,
         absoluteMax: number = Infinity
     ): { size: number, polyVwap: number, kalshiVwap: number, polyWorstPrice: number, kalshiWorstPriceCents: number, totalKalshiFees: number, marginEAR: number, polyConsumed: Map<number, number>, kalshiConsumed: Map<number, number> } {
 
@@ -269,7 +269,7 @@ export class PairManager {
         const kalshiExpMs = this.pairData.kalshiMarket.expiration ? new Date(this.pairData.kalshiMarket.expiration).getTime() : Infinity;
         const expirationMs = Math.min(polyExpMs, kalshiExpMs);
         const daysToExpiration = (expirationMs - Date.now()) / 86_400_000;
-
+        const expiringDate = Number.isFinite(expirationMs) ? new Date(expirationMs) : undefined;
         const minEarThreshold = (settings as any).minEarThreshold ?? 0.15;
         const alignment = this.pairData.outcomeAlignment;
 
@@ -277,30 +277,30 @@ export class PairManager {
             this.checkAndTriggerEntry('PolyYes_KalshiNo',
                 this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
                 this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks']),
-                daysToExpiration, minEarThreshold
+                daysToExpiration, minEarThreshold, expiringDate
             );
             this.checkAndTriggerEntry('PolyNo_KalshiYes',
                 this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
                 this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks']),
-                daysToExpiration, minEarThreshold
+                daysToExpiration, minEarThreshold, expiringDate
             );
         } else if (alignment === -1) {
             this.checkAndTriggerEntry('PolyYes_KalshiYes_Flipped',
                 this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
                 this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks']),
-                daysToExpiration, minEarThreshold
+                daysToExpiration, minEarThreshold, expiringDate
             );
             this.checkAndTriggerEntry('PolyNo_KalshiNo_Flipped',
                 this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
                 this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks']),
-                daysToExpiration, minEarThreshold
+                daysToExpiration, minEarThreshold, expiringDate
             );
         }
     }
 
     private async checkAndTriggerEntry(
         type: string, polyAsks: any[], kalshiAsks: any[],
-        daysToExpiration: number, minEarThreshold: number
+        daysToExpiration: number, minEarThreshold: number, expiringDate?: Date
     ) {
         // Guard: never double-enter a pair we already hold.
         if (this.portfolio.getPosition(this.pairId)) return;
@@ -317,7 +317,7 @@ export class PairManager {
                 const settings = await this.getSettings();
                 this.lastArbitrageTime = Date.now();
                 if (settings.isPaperTrading) {
-                    this.executePaperEntry(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap, sweep.marginEAR, daysToExpiration, settings.simulatedLatency);
+                    this.executePaperEntry(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap, sweep.marginEAR, daysToExpiration, settings.simulatedLatency, expiringDate);
                 } else {
                     // Pre-execution budget guard: silently abort if wallets cannot cover the order.
                     const polyRequiredCost = sweep.polyVwap * approvedSize;
@@ -352,7 +352,7 @@ export class PairManager {
 
     private async executePaperEntry(
         type: string, approvedSize: number, detectedSpread: number,
-        detectedEAR: number, daysToExpiration: number, latencyMs: number
+        detectedEAR: number, daysToExpiration: number, latencyMs: number, expiringDate?: Date
     ) {
         const timeDetected = new Date().toISOString();
         await new Promise(resolve => setTimeout(resolve, latencyMs));
@@ -385,7 +385,7 @@ export class PairManager {
 
         // Re-run the sweep at execution time (T+latency) to confirm the opportunity still clears the EAR gate.
         const minEarThreshold = 0.15; // Mirror of Settings default; re-fetching from DB here would be over-engineering.
-        const realSweep = this.calculateSweep(execPolyAsks, execKalshiAsks, daysToExpiration, minEarThreshold, approvedSize);
+        const realSweep = this.calculateSweep(execPolyAsks, execKalshiAsks, daysToExpiration, minEarThreshold, expiringDate, approvedSize);
 
         let realizedSpreadStr = "FAILED (MOVED/EMPTIED or EAR degraded)";
         let successFlag = "❌ MISSED";
@@ -407,21 +407,24 @@ export class PairManager {
                 kGhostMap.set(price, (kGhostMap.get(price) || 0) + size);
             }
 
-            this.portfolio.openPosition(
+            const opened = this.portfolio.openPosition(
                 this.pairId, this.pairData.polyMarket.market_question, type,
-                realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap, realSweep.totalKalshiFees
+                realSweep.size, realSweep.polyVwap, realSweep.kalshiVwap, realSweep.totalKalshiFees, realSweep.marginEAR, expiringDate
             );
-
-            SimulatedTrade.create({
-                pairId: this.pairId,
-                marketQuestion: this.pairData.polyMarket.market_question,
-                type: 'buy',
-                polyQuantity: realSweep.size,
-                kalshiQuantity: realSweep.size,
-                averagePolyPrice: realSweep.polyVwap,
-                // Fee is charged on entry; distribute across shares for per-unit cost basis.
-                averageKalshiPrice: realSweep.kalshiVwap + (realSweep.totalKalshiFees / realSweep.size)
-            }).catch(e => logger.error(`[PairManager] Error persisting SimulatedTrade to DB: ${e.message}`));
+            if (opened) {
+                SimulatedTrade.create({
+                    pairId: this.pairId,
+                    marketQuestion: this.pairData.polyMarket.market_question,
+                    type: 'buy',
+                    polyQuantity: realSweep.size,
+                    kalshiQuantity: realSweep.size,
+                    averagePolyPrice: realSweep.polyVwap,
+                    // Fee is charged on entry; distribute across shares for per-unit cost basis.
+                    averageKalshiPrice: realSweep.kalshiVwap + (realSweep.totalKalshiFees / realSweep.size)
+                }).catch(e => logger.error(`[PairManager] Error persisting SimulatedTrade to DB: ${e.message}`));
+            } else {
+                logger.warn(`[PairManager] Simulated position not persisted for ${this.pairId}. Skipping SimulatedTrade write.`);
+            }
         }
 
         const msg = `
@@ -438,4 +441,4 @@ Detect VWAP: ${detectedSpread.toFixed(3)} | EAR: ${(detectedEAR * 100).toFixed(1
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
 
-}
+}

@@ -200,7 +200,8 @@ export class LiveEngine {
                             finalSize,
                             polyPrice,
                             kalshiPrice,
-                            kalshiFeeAmount
+                            kalshiFeeAmount,
+                            payload.expectedEAR
                         );
                     } else {
                         this.portfolioManager.closePosition(
@@ -300,3 +301,6 @@ export class LiveEngine {
         });
     }
 }
+
+
+

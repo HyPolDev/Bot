@@ -13,6 +13,8 @@ export interface Position {
     kalshiCost: number;
     totalCost: number;
     timestamp: number;
+    expiringDate: any;
+    expectedAnnualizedReturn: number | undefined;
 }
 
 export class PortfolioManager {
@@ -83,7 +85,9 @@ export class PortfolioManager {
                         polyCost: pos.averagePolyPrice * pos.polymarketQuantity,
                         kalshiCost: pos.averageKalshiPrice * pos.kalshiQuantity + pos.exitFees,
                         totalCost,
-                        timestamp: Date.now() // Could use createdAt from DB
+                        timestamp: Date.now(), // Could use createdAt from DB
+                        expiringDate: pos.expiringDate,
+                        expectedAnnualizedReturn: pos.expectedAnnualizedReturn
                     });
                 }
                 logger.info(`[Portfolio] Restored ${dbPositions.length} simulated positions. Simulated Balances -> Poly: $${this.polyCash.toFixed(2)} | Kalshi: $${this.kalshiCash.toFixed(2)}`);
@@ -181,7 +185,9 @@ export class PortfolioManager {
                                 polyCost: polyCost,
                                 kalshiCost: kalshiCost, // Pushing the blended cost to state
                                 totalCost: polyCost + kalshiCost,
-                                timestamp: Date.now()
+                                timestamp: Date.now(),
+                                expiringDate: pos?.expiringDate,
+                                expectedAnnualizedReturn: pos?.expectedAnnualizedReturn
                             });
                             logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize} | Poly @ ${polyEntryPrice.toFixed(3)} | Kalshi @ ${kalshiBlendedEntryPrice.toFixed(3)} (Inc. Est. Fees)`);
                         } else {
@@ -282,7 +288,7 @@ export class PortfolioManager {
 
     public openPosition(
         pairId: string, marketQuestion: string, type: string, size: number,
-        polyPrice: number, kalshiPrice: number, kalshiFees: number
+        polyPrice: number, kalshiPrice: number, kalshiFees: number, EAR: number, expiringDate: any
     ) {
         const polyCost = size * polyPrice;
         const kalshiCost = size * kalshiPrice;
@@ -290,7 +296,7 @@ export class PortfolioManager {
 
         if (polyCost > this.polyCash || (kalshiCost + kalshiFees) > this.kalshiCash) {
             logger.error(`[Portfolio] FATAL: Insufficient funds! PolyCost: ${polyCost}, KalshiReq: ${kalshiCost + kalshiFees}`);
-            return;
+            return false;
         }
 
         if (this.openPositions.has(pairId)) {
@@ -309,7 +315,7 @@ export class PortfolioManager {
             this.kalshiCash -= (kalshiCost + kalshiFees); // FIX: Deduct the fee from the wallet!
 
             this.persistSimulationOpen(pos, totalCost, kalshiFees);
-            return;
+            return true;
         }
 
         const newPosition: Position = {
@@ -318,7 +324,9 @@ export class PortfolioManager {
             polyCost,
             kalshiCost: kalshiCost + kalshiFees, // Include fees in the tracker
             totalCost,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            expiringDate,
+            expectedAnnualizedReturn: EAR
         };
 
         this.openPositions.set(pairId, newPosition);

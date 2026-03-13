@@ -10,7 +10,7 @@ export interface IPosition extends Document {
     averageKalshiPrice: number;
     kalshiQuantity: number;
     exitFees: number;
-    expiringDate: Date;
+    expiringDate: any;
     expectedAnnualizedReturn: number;
 }
 

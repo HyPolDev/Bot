@@ -145,6 +145,7 @@ async function run() {
     const DATA_DIR = path.join(process.cwd(), 'data');
     const inputFile = path.join(DATA_DIR, 'candidate_market_groups.json');
     const logsFile = path.join(DATA_DIR, 'llm_responses.json');
+    const rejectedCacheFile = path.join(DATA_DIR, 'rejected_pairs_cache.json');
 
     if (!fs.existsSync(inputFile)) {
         console.error(`Error: ${inputFile} not found.`);
@@ -155,6 +156,18 @@ async function run() {
     const candidates: CandidatePair[] = JSON.parse(rawData);
 
     if (candidates.length === 0) return;
+
+    // --- LOAD REJECTED CACHE ---
+    let rejectedCache = new Set<string>();
+    if (fs.existsSync(rejectedCacheFile)) {
+        try {
+            const parsed = JSON.parse(fs.readFileSync(rejectedCacheFile, 'utf-8'));
+            rejectedCache = new Set(parsed);
+            console.log(`Loaded ${rejectedCache.size} previously rejected pairs from cache.`);
+        } catch (e) {
+            console.warn(`Warning: Could not parse ${rejectedCacheFile}. Starting fresh.`);
+        }
+    }
 
     const ai = buildOpenAI();
 
@@ -178,7 +191,28 @@ async function run() {
     const activePromises = new Set<Promise<void>>();
 
     for (const pair of candidates) {
-        const worker = askLLM(ai, pair.polyMarket, pair.kalshiMarket).then(async (res) => {
+        const worker = (async () => {
+            const pairId = `${pair.kalshiMarket.internal_id}+${pair.polyMarket.internal_id}`;
+
+            // --- 1. CHECK REJECTED CACHE (Local File) ---
+            if (rejectedCache.has(pairId)) {
+                processedCount++;
+                bar.update(processedCount, { confirmed: validatedPairs.length });
+                return; // Skip LLM completely
+            }
+
+            // --- 2. CHECK ACCEPTED CACHE (MongoDB) ---
+            const alreadyInDb = await MarketPair.exists({ pairId });
+            if (alreadyInDb) {
+                processedCount++;
+                validatedPairs.push({ ...pair, outcomeAlignment: 1 });
+                bar.update(processedCount, { confirmed: validatedPairs.length });
+                return; // Skip LLM completely
+            }
+
+            // --- 3. LLM CALL (Only if totally new) ---
+            const res = await askLLM(ai, pair.polyMarket, pair.kalshiMarket);
+
             processedCount++;
 
             llmLogs.push({
@@ -188,8 +222,8 @@ async function run() {
             });
 
             if (res.alignment === 1) {
+                // Save Match to DB
                 validatedPairs.push({ ...pair, outcomeAlignment: 1 });
-                const pairId = `${pair.kalshiMarket.internal_id}+${pair.polyMarket.internal_id}`;
                 await MarketPair.findOneAndUpdate(
                     { pairId },
                     {
@@ -207,12 +241,18 @@ async function run() {
                     },
                     { upsert: true }
                 );
+            } else {
+                // Save Rejection to Local Cache
+                rejectedCache.add(pairId);
+                // Serialize Set back to JSON Array
+                fs.writeFileSync(rejectedCacheFile, JSON.stringify(Array.from(rejectedCache), null, 2));
             }
 
             bar.update(processedCount, { confirmed: validatedPairs.length });
 
+            // Write LLM logs only when a new API call was made
             fs.writeFileSync(logsFile, JSON.stringify(llmLogs, null, 2));
-        });
+        })();
 
         activePromises.add(worker);
 

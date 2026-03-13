@@ -1,6 +1,7 @@
 import fs from 'fs';
 import WebSocket from 'ws';
 import crypto from 'crypto';
+import { logger } from '../logger.js';
 
 export class KalshiWS {
     private outcomeId: string;
@@ -48,7 +49,21 @@ export class KalshiWS {
 
         let signature = "";
         try {
-            const privateKey = fs.readFileSync(process.env.KALSHI_KEY_PATH || '', 'utf-8');
+            const privateKey = process.env.KALSHI_PRIVATE_KEY || (() => {
+                try {
+                    return fs.readFileSync(process.env.KALSHI_KEY_PATH || '', 'utf-8');
+                } catch {
+                    return '';
+                }
+            })();
+
+            if (!privateKey) {
+                console.error("\n[KalshiWS] Missing private key. Set KALSHI_PRIVATE_KEY or KALSHI_KEY_PATH.");
+                // Retry later in case env is updated at runtime.
+                setTimeout(() => this.connect(), 10000);
+                return;
+            }
+
             const sign = crypto.createSign('SHA256');
             sign.update(msgString);
             sign.end();
@@ -59,7 +74,7 @@ export class KalshiWS {
                 saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST
             }, 'base64');
         } catch (e) {
-            console.error("\n[KalshiWS] Failed to generate RSA Signature.");
+            console.error("\n[KalshiWS] Failed to generate RSA Signature.", e);
             return;
         }
 
@@ -75,7 +90,7 @@ export class KalshiWS {
             const subscribeMsg = {
                 id: 1,
                 cmd: "subscribe",
-                params: { channels: ["orderbook_delta"], market_tickers: [this.outcomeId] }
+                params: { channels: ["orderbook_delta"], market_ticker: this.outcomeId }
             };
             ws.send(JSON.stringify(subscribeMsg));
         });
@@ -84,15 +99,18 @@ export class KalshiWS {
             try {
                 const payload = JSON.parse(data.toString());
 
-                if (payload.type === 'error') return;
+                if (payload.type === 'error') {
+                    console.error(`[KalshiWS] Error payload: ${JSON.stringify(payload)}`);
+                    return;
+                }
 
                 if (payload.type === 'orderbook_snapshot') {
                     this.kalshiBooks.yes.clear();
                     this.kalshiBooks.no.clear();
 
                     const msg = payload.msg || {};
-                    const yesArr = msg.yes || msg.orderbook?.yes || msg.orderbook_fp?.yes_dollars || [];
-                    const noArr = msg.no || msg.orderbook?.no || msg.orderbook_fp?.no_dollars || [];
+                    const yesArr = msg.yes_dollars_fp || [];
+                    const noArr = msg.no_dollars_fp || [];
 
                     yesArr.forEach((b: any) => {
                         const price = this.normalizePrice(b[0]);
@@ -111,9 +129,10 @@ export class KalshiWS {
                     this.emitUpdate();
                 }
                 else if (payload.type === 'orderbook_delta') {
-                    const price = this.normalizePrice(payload.msg?.price ?? payload.msg?.price_fp);
-                    const delta = this.normalizeSize(payload.msg?.delta ?? payload.msg?.delta_fp);
-                    const sideStr = (payload.msg?.side || "").toLowerCase();
+                    const msg = payload.msg || {};
+                    const price = this.normalizePrice(msg.price_dollars || msg.price);
+                    const delta = this.normalizeSize(msg.delta_fp || msg.delta);
+                    const sideStr = (msg.side || "").toLowerCase();
 
                     if (price === null || delta === null) return;
 
@@ -144,7 +163,9 @@ export class KalshiWS {
             setTimeout(() => this.connect(), 5000);
         });
 
-        ws.on('error', () => { });
+        ws.on('error', (err) => {
+            logger.error(`[KalshiWS] Socket error: ${err.message}`);
+        });
     }
 
     private emitUpdate() {
@@ -156,7 +177,7 @@ export class KalshiWS {
                     return { price: askPrice, size };
                 })
                 .filter((v: any) => v !== null)
-                .sort((a, b) => a.price - b.price);
+                .sort((a: any, b: any) => a.price - b.price);
         };
 
         const yesBids = Array.from(this.kalshiBooks.yes.entries())
