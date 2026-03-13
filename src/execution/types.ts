@@ -11,6 +11,7 @@ export interface ExecutionPayload {
     isEntry: boolean;          // true = BUY, false = SELL
     expectedEAR?: number;      // Expected Annualized Return for queue priority ranking
     availableLiquidity?: number; // Orderbook depth for ranking
+    expiringDate?: any;
 }
 
 export type ExecutionStatus = 'filled' | 'canceled' | 'failed';

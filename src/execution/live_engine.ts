@@ -201,7 +201,8 @@ export class LiveEngine {
                             polyPrice,
                             kalshiPrice,
                             kalshiFeeAmount,
-                            payload.expectedEAR
+                            payload.expectedEAR,
+                            payload.expiringDate
                         );
                     } else {
                         this.portfolioManager.closePosition(

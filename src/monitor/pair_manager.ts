@@ -344,6 +344,7 @@ export class PairManager {
                         isEntry: true,
                         expectedEAR: sweep.marginEAR,  // Queue priority: higher EAR trades execute first
                         availableLiquidity: sweep.size,
+                        expiringDate: expiringDate
                     });
                 }
             }
