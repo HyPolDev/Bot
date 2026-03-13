@@ -37,4 +37,10 @@ const PositionSchema: Schema = new Schema({
     timestamps: true
 });
 
+// Guarantee that only one "open" position can exist per pairId in the database
+PositionSchema.index(
+    { pairId: 1, state: 1 }, 
+    { unique: true, partialFilterExpression: { state: 'open' } }
+);
+
 export const Position = mongoose.model<IPosition>('Position', PositionSchema);

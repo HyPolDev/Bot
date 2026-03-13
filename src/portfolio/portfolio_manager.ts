@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger.js';
 import { SimulatedPosition } from '../db/models/SimulatedPosition.js';
+import { Position as PositionModel } from '../db/models/Position.js';
 import { Settings } from '../db/models/Settings.js';
 
 export interface Position {
@@ -63,8 +64,8 @@ export class PortfolioManager {
                 logger.info(`[Portfolio] Paper Trading Enabled. Fetching simulated balances and positions...`);
 
                 // Hardcoded initial simulated balances (or could be moved to Settings later)
-                this.polyCash = 1000;
-                this.kalshiCash = 1000;
+                this.polyCash = 10000;
+                this.kalshiCash = 10000;
 
                 const dbPositions = await SimulatedPosition.find({ state: 'open' });
                 for (const pos of dbPositions) {
@@ -289,7 +290,7 @@ export class PortfolioManager {
     public openPosition(
         pairId: string, marketQuestion: string, type: string, size: number,
         polyPrice: number, kalshiPrice: number, kalshiFees: number, EAR: number, expiringDate: any
-    ) {
+    ): boolean {
         const polyCost = size * polyPrice;
         const kalshiCost = size * kalshiPrice;
         const totalCost = polyCost + kalshiCost + kalshiFees;
@@ -314,7 +315,7 @@ export class PortfolioManager {
             this.polyCash -= polyCost;
             this.kalshiCash -= (kalshiCost + kalshiFees); // FIX: Deduct the fee from the wallet!
 
-            this.persistSimulationOpen(pos, totalCost, kalshiFees);
+            this.persistPositionOpen(pos, totalCost, kalshiFees);
             return true;
         }
 
@@ -333,43 +334,46 @@ export class PortfolioManager {
         this.polyCash -= polyCost;
         this.kalshiCash -= (kalshiCost + kalshiFees);
 
-        this.persistSimulationOpen(newPosition, totalCost, kalshiFees);
+        this.persistPositionOpen(newPosition, totalCost, kalshiFees);
+        return true;
     }
 
-    private async persistSimulationOpen(pos: Position, totalCost: number, kalshiFees: number) {
+    private async persistPositionOpen(pos: Position, totalCost: number, kalshiFees: number) {
         try {
             const settings = await Settings.findOne();
-            if (settings && settings.isPaperTrading) {
-                await SimulatedPosition.findOneAndUpdate(
-                    { pairId: pos.pairId, state: 'open' },
-                    {
-                        $set: {
-                            marketQuestion: pos.marketQuestion,
-                            type: pos.type,
-                            averagePolyPrice: pos.polyEntryPrice,
-                            polymarketQuantity: pos.size,
-                            averageKalshiPrice: pos.kalshiEntryPrice,
-                            kalshiQuantity: pos.size
-                        },
-                        $inc: { exitFees: kalshiFees },
-                        $setOnInsert: {
-                            expiringDate: new Date(Date.now() + (settings.expirationWindow * 30 * 24 * 60 * 60 * 1000)),
-                            expectedAnnualizedReturn: 0
-                        }
+            const isPaperTrading = settings?.isPaperTrading ?? true;
+            const Model = isPaperTrading ? SimulatedPosition : PositionModel;
+
+            await (Model as any).findOneAndUpdate(
+                { pairId: pos.pairId, state: 'open' },
+                {
+                    $set: {
+                        marketQuestion: pos.marketQuestion,
+                        type: pos.type,
+                        averagePolyPrice: pos.polyEntryPrice,
+                        polymarketQuantity: pos.size,
+                        averageKalshiPrice: pos.kalshiEntryPrice,
+                        kalshiQuantity: pos.size
                     },
-                    { upsert: true, new: true, setDefaultsOnInsert: true }
-                );
-            }
+                    $inc: { exitFees: kalshiFees },
+                    $setOnInsert: {
+                        expiringDate: pos.expiringDate,
+                        expectedAnnualizedReturn: pos.expectedAnnualizedReturn,
+                        state: 'open'
+                    }
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
         } catch (error) {
-            logger.error(`[Portfolio] Error saving SimulatedPosition to DB:`, error);
+            logger.error(`[Portfolio] Error saving Position to DB:`, error);
         }
     }
 
     public closePosition(
         pairId: string, exitSize: number, polyExitPrice: number, kalshiExitPrice: number, kalshiExitFees: number
-    ) {
+    ): boolean {
         const position = this.openPositions.get(pairId);
-        if (!position) return;
+        if (!position) return false;
 
         const actualExitSize = Math.min(exitSize, position.size);
 
@@ -400,28 +404,30 @@ export class PortfolioManager {
         }
 
         const logPosition = { ...position, size: actualExitSize };
-        this.persistSimulationClose(pairId, actualExitSize, position.size);
+        this.persistPositionClose(pairId, actualExitSize, position?.size || 0);
+        return true;
     }
 
-    private async persistSimulationClose(pairId: string, exitSize: number, remainingSize: number) {
+    private async persistPositionClose(pairId: string, exitSize: number, remainingSize: number) {
         try {
             const settings = await Settings.findOne();
-            if (settings && settings.isPaperTrading) {
-                const dbPos = await SimulatedPosition.findOne({ pairId, state: 'open' });
-                if (dbPos) {
-                    if (remainingSize <= 0) {
-                        dbPos.state = 'closed';
-                        await dbPos.save();
-                    } else {
-                        // Partial close
-                        dbPos.polymarketQuantity = remainingSize;
-                        dbPos.kalshiQuantity = remainingSize;
-                        await dbPos.save();
-                    }
+            const isPaperTrading = settings?.isPaperTrading ?? true;
+            const Model = isPaperTrading ? SimulatedPosition : PositionModel;
+
+            const dbPos = await (Model as any).findOne({ pairId, state: 'open' });
+            if (dbPos) {
+                if (remainingSize <= 0) {
+                    dbPos.state = 'closed';
+                    await dbPos.save();
+                } else {
+                    // Partial close
+                    dbPos.polymarketQuantity = remainingSize;
+                    dbPos.kalshiQuantity = remainingSize;
+                    await dbPos.save();
                 }
             }
         } catch (error) {
-            logger.error(`[Portfolio] Error closing SimulatedPosition in DB:`, error);
+            logger.error(`[Portfolio] Error closing Position in DB:`, error);
         }
     }
 
