@@ -1,0 +1,7 @@
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚡️ secrets for agents: https://dotenvx.com/as2
+--- Starting Liquidity Relay Rotation Test ---
+[Setup] Injected weak open position: Cost Basis 0.90
+[Setup] Injected missed massive EAR opportunity (500%)
+[Test] Evaluating Rotations...
+✅ SUCCESS: Position was liquidated by LiquidityRelay!
