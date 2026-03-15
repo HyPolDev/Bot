@@ -11,7 +11,7 @@ export interface IPosition extends Document {
     kalshiQuantity: number;
     exitFees: number;
     expiringDate: any;
-    expectedAnnualizedReturn: number;
+    expectedAnnualizedReturn?: number;
 }
 
 const PositionSchema: Schema = new Schema({
@@ -39,7 +39,7 @@ const PositionSchema: Schema = new Schema({
 
 // Guarantee that only one "open" position can exist per pairId in the database
 PositionSchema.index(
-    { pairId: 1, state: 1 }, 
+    { pairId: 1, state: 1 },
     { unique: true, partialFilterExpression: { state: 'open' } }
 );
 

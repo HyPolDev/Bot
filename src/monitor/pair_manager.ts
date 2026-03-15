@@ -92,6 +92,7 @@ export class PairManager {
                 if (updatedSide.isYes) this.latestPolyBook.yes = { bids: updatedSide.bids, asks: updatedSide.asks };
                 else this.latestPolyBook.no = { bids: updatedSide.bids, asks: updatedSide.asks };
 
+                this.evaluateAbsoluteTakeProfit();
                 this.evaluateEntry();
                 if (this.onUIUpdate) this.onUIUpdate();
             });
@@ -99,6 +100,7 @@ export class PairManager {
             this.kalshiWsClient = new KalshiWS(this.pairData.kalshiMarket.internal_id, (source, fullBook) => {
                 this.latestKalshiBook = fullBook;
 
+                this.evaluateAbsoluteTakeProfit();
                 this.evaluateEntry();
                 if (this.onUIUpdate) this.onUIUpdate();
             });
@@ -254,6 +256,115 @@ export class PairManager {
         };
     }
 
+    private async evaluateAbsoluteTakeProfit() {
+        const pos = this.portfolio.getPosition(this.pairId);
+        if (!pos || !this.latestKalshiBook || !this.liveEngine.isSystemReady) return;
+
+        // 1. Seleccionar los libros de Bids correctos según nuestra posición
+        let pBids = []; let kBids = [];
+        if (pos.type === 'PolyYes_KalshiNo') {
+            pBids = this.latestPolyBook.yes?.bids || [];
+            kBids = this.latestKalshiBook.no?.bids || [];
+        } else if (pos.type === 'PolyNo_KalshiYes') {
+            pBids = this.latestPolyBook.no?.bids || [];
+            kBids = this.latestKalshiBook.yes?.bids || [];
+        } else if (pos.type === 'PolyYes_KalshiYes_Flipped') {
+            pBids = this.latestPolyBook.yes?.bids || [];
+            kBids = this.latestKalshiBook.yes?.bids || [];
+        } else if (pos.type === 'PolyNo_KalshiNo_Flipped') {
+            pBids = this.latestPolyBook.no?.bids || [];
+            kBids = this.latestKalshiBook.no?.bids || [];
+        }
+
+        if (pBids.length === 0 || kBids.length === 0) return;
+
+        // 2. Barrido del Orderbook (Sweep)
+        let pIdx = 0; let kIdx = 0;
+        const pBook = pBids.map((l: any) => ({ ...l }));
+        const kBook = kBids.map((l: any) => ({ ...l }));
+
+        let totalShares = 0;
+        let polyRevenue = 0;
+        let kalshiRevenue = 0;
+        let polyWorstPrice = 1; // Para ventas, el peor precio es el más bajo
+        let kalshiWorstPrice = 1;
+
+        // Intentamos barrer hasta llenar el tamaño total de nuestra posición
+        while (pIdx < pBook.length && kIdx < kBook.length && totalShares < pos.size) {
+            const p = pBook[pIdx];
+            const k = kBook[kIdx];
+
+            // Pre-filtro bruto: si la suma de los bids puros ya es < 1.00, no vale la pena seguir bajando en el libro
+            if (p.price + k.price < 1.00) break;
+
+            const overlap = Math.min(p.size, k.size);
+            if (overlap <= 0) break;
+
+            // Aquí NO usamos el /2 de safety buffer porque nuestro objetivo es vaciar nuestro inventario exacto
+            const take = Math.min(overlap, pos.size - totalShares);
+            if (take <= 0) break;
+
+            totalShares += take;
+            polyRevenue += take * p.price;
+            kalshiRevenue += take * k.price;
+
+            polyWorstPrice = Math.min(polyWorstPrice, p.price);
+            kalshiWorstPrice = Math.min(kalshiWorstPrice, k.price);
+
+            p.size -= overlap;
+            k.size -= overlap;
+            if (p.size <= 0) pIdx++;
+            if (k.size <= 0) kIdx++;
+        }
+
+        if (totalShares === 0) return;
+
+        // 3. Calcular VWAP y Comisiones del Bloque
+        const blendedKalshiPrice = kalshiRevenue / totalShares;
+
+        // El 'ceil' se aplica una sola vez al bloque completo
+        const totalKalshiFees = Math.ceil(0.07 * totalShares * blendedKalshiPrice * (1 - blendedKalshiPrice) * 100) / 100;
+
+        const netRevenue = polyRevenue + kalshiRevenue - totalKalshiFees;
+        const netRevenuePerShare = netRevenue / totalShares;
+
+        // 4. CONDICIÓN DE COSECHA SEGURA
+        // Exigimos que podamos vender AL MENOS el 10% de nuestra posición si la oportunidad es real,
+        // o el 100% si es pequeña, para no gastar llamadas de API por 1 solo contrato.
+        const minViableExit = Math.max(1, Math.floor(pos.size * 0.1));
+
+        if (netRevenuePerShare >= 1.00 && totalShares >= minViableExit) {
+            logger.info(`[TAKE PROFIT ABSOLUTO] 🚨 ${this.pairId} ofrece ${netRevenuePerShare.toFixed(3)} neto por ${totalShares} contratos. Liquidando.`);
+
+            const settings = await this.getSettings();
+            this.lastArbitrageTime = Date.now();
+
+            if (settings.isPaperTrading) {
+                // Reutiliza tu lógica de simulación de salida aquí
+                this.portfolio.closePosition(this.pairId, totalShares, polyRevenue / totalShares, kalshiRevenue / totalShares, totalKalshiFees);
+            } else {
+                const polyAssetId = pos.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
+                const kalshiSide = pos.type.includes('KalshiYes') ? 'yes' : 'no';
+
+                this.liveEngine.queueOrder({
+                    pairId: this.pairId,
+                    marketQuestion: this.pairData.polyMarket.market_question,
+                    tradeType: pos.type,
+                    targetSize: totalShares,
+                    polyAssetId: polyAssetId,
+                    kalshiTicker: this.pairData.kalshiMarket.internal_id,
+                    kalshiSide: kalshiSide as 'yes' | 'no',
+                    polyMaxVwap: Math.floor(polyWorstPrice * 100) / 100, // Suelo para Poly
+                    kalshiMaxVwap: Math.floor(kalshiWorstPrice * 100) / 100, // Suelo para Kalshi (peor precio aceptable)
+                    isEntry: false,
+                    expectedEAR: 999, // Prioridad máxima en la cola
+                    availableLiquidity: totalShares,
+                    expiringDate: this.pairData.polyMarket.expiration
+                });
+            }
+        }
+    }
+
     private async evaluateEntry() {
         if (!this.liveEngine.isSystemReady) return;
         if (!this.latestKalshiBook) return;
@@ -323,8 +434,30 @@ export class PairManager {
                     const polyRequiredCost = sweep.polyVwap * approvedSize;
                     const kalshiRequiredCost = sweep.kalshiVwap * approvedSize;
 
+                    const opPolyCash = this.portfolio.getOperationalPolyCash(this.risk);
+                    const opKalshiCash = this.portfolio.getOperationalKalshiCash(this.risk);
+
+                    let useBuffer = false;
+
                     if (this.portfolio.getPolyCash() < polyRequiredCost || this.portfolio.getKalshiCash() < kalshiRequiredCost) {
                         return;
+                    }
+
+                    if (opPolyCash < polyRequiredCost || opKalshiCash < kalshiRequiredCost) {
+                        // 2. No tenemos operativo. ¿Tenemos suficiente en el Colchón Total?
+                        if (this.portfolio.getPolyCash() >= polyRequiredCost && this.portfolio.getKalshiCash() >= kalshiRequiredCost) {
+
+                            // 3. Evaluamos si vale la pena el relevo
+                            const isValidRelay = await this.portfolio.evaluateRelayRotation(sweep.marginEAR, polyRequiredCost + kalshiRequiredCost);
+
+                            if (!isValidRelay) {
+                                return; // La nueva oportunidad no compensa el peaje de vender la peor posición
+                            }
+
+                            useBuffer = true; // Permiso concedido para usar el colchón
+                        } else {
+                            return; // Ni siquiera el colchón puede pagarlo
+                        }
                     }
 
                     // Live entry routing
@@ -346,6 +479,11 @@ export class PairManager {
                         availableLiquidity: sweep.size,
                         expiringDate: expiringDate
                     });
+
+                    if (useBuffer) {
+                        let response = await this.portfolio.triggerBufferReplenishment(polyRequiredCost + kalshiRequiredCost); //add IMPORTANTexecution engine and change triggerbufferReplenishment
+                        if (response) this.liveEngine.queueOrder(response);
+                    }
                 }
             }
         }
@@ -442,4 +580,67 @@ Detect VWAP: ${detectedSpread.toFixed(3)} | EAR: ${(detectedEAR * 100).toFixed(1
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
 
+    // [AÑADIR A PairManager.ts]
+    public simulateExit(targetSize: number): { size: number, netRevenue: number } {
+        const pos = this.portfolio.getPosition(this.pairId);
+        if (!pos) return { size: 0, netRevenue: 0 };
+
+        // 1. Seleccionar los libros de Bids según el tipo de posición
+        let pBids = []; let kBids = [];
+        if (pos.type === 'PolyYes_KalshiNo') {
+            pBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity['poly_yes_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
+        } else if (pos.type === 'PolyNo_KalshiYes') {
+            pBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity['poly_no_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
+        } else if (pos.type === 'PolyYes_KalshiYes_Flipped') {
+            pBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity['poly_yes_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
+        } else if (pos.type === 'PolyNo_KalshiNo_Flipped') {
+            pBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity['poly_no_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
+        }
+
+        if (pBids.length === 0 || kBids.length === 0) return { size: 0, netRevenue: 0 };
+
+        // 2. Barrido del Orderbook (Bids)
+        let pIdx = 0; let kIdx = 0;
+        const pBook = pBids.map((l: any) => ({ ...l }));
+        const kBook = kBids.map((l: any) => ({ ...l }));
+
+        let totalShares = 0;
+        let polyRevenue = 0;
+        let kalshiRevenue = 0;
+
+        while (pIdx < pBook.length && kIdx < kBook.length && totalShares < targetSize) {
+            const p = pBook[pIdx];
+            const k = kBook[kIdx];
+
+            const overlap = Math.min(p.size, k.size);
+            if (overlap <= 0) break;
+
+            const take = Math.min(overlap, targetSize - totalShares);
+            if (take <= 0) break;
+
+            totalShares += take;
+            polyRevenue += take * p.price;
+            kalshiRevenue += take * k.price;
+
+            p.size -= overlap;
+            k.size -= overlap;
+            if (p.size <= 0) pIdx++;
+            if (k.size <= 0) kIdx++;
+        }
+
+        if (totalShares === 0) return { size: 0, netRevenue: 0 };
+
+        // 3. Comisiones calculadas sobre el bloque total
+        const blendedKalshiPrice = kalshiRevenue / totalShares;
+        const totalKalshiFees = Math.ceil(0.07 * totalShares * blendedKalshiPrice * (1 - blendedKalshiPrice) * 100) / 100;
+
+        return {
+            size: totalShares,
+            netRevenue: polyRevenue + kalshiRevenue - totalKalshiFees
+        };
+    }
 }

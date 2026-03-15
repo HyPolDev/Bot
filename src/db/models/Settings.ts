@@ -15,7 +15,7 @@ const SettingsSchema = new Schema({
     vectorSearchThreshold: { type: Number, required: true, default: 0.9 },
     arbitrageCooldown: { type: Number, required: true, default: 10000 },
     simulatedLatency: { type: Number, required: true, default: 1000 },
-    minEarThreshold: { type: Number, required: true, default: 0.15 },
+    minEarThreshold: { type: Number, required: true, default: 0.20 },
 }, {
     timestamps: true
 });

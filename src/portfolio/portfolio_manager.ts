@@ -2,6 +2,7 @@ import { logger } from '../utils/logger.js';
 import { SimulatedPosition } from '../db/models/SimulatedPosition.js';
 import { Position as PositionModel } from '../db/models/Position.js';
 import { Settings } from '../db/models/Settings.js';
+import { RiskManager } from './risk_manager.js';
 
 export interface Position {
     pairId: string;
@@ -64,8 +65,8 @@ export class PortfolioManager {
                 logger.info(`[Portfolio] Paper Trading Enabled. Fetching simulated balances and positions...`);
 
                 // Hardcoded initial simulated balances (or could be moved to Settings later)
-                this.polyCash = 10000;
-                this.kalshiCash = 10000;
+                this.polyCash = 100;
+                this.kalshiCash = 100;
 
                 const dbPositions = await SimulatedPosition.find({ state: 'open' });
                 for (const pos of dbPositions) {
@@ -78,7 +79,7 @@ export class PortfolioManager {
 
                     this.openPositions.set(pos.pairId, {
                         pairId: pos.pairId,
-                        marketQuestion: "Simulated Market (Restored)", // We don't save marketQuestion in DB currently
+                        marketQuestion: pos.marketQuestion,
                         type: pos.type as string,
                         size: pos.polymarketQuantity, // Assuming sizes match
                         polyEntryPrice: pos.averagePolyPrice,
@@ -267,6 +268,16 @@ export class PortfolioManager {
         return position ? position.totalCost : 0;
     }
 
+    public getOperationalPolyCash(riskManager: RiskManager): number {
+        const buffer = riskManager.getMaxTradeBudget();
+        return Math.max(0, this.polyCash - buffer);
+    }
+
+    public getOperationalKalshiCash(riskManager: RiskManager): number {
+        const buffer = riskManager.getMaxTradeBudget();
+        return Math.max(0, this.kalshiCash - buffer);
+    }
+
     // Safety Orchestration: Pair Banning
     public banPair(pairId: string, durationMs: number = 600000): void {
         const unbanTime = Date.now() + durationMs;
@@ -431,4 +442,109 @@ export class PortfolioManager {
         }
     }
 
+    public async evaluateRelayRotation(newEAR: number, capitalNeeded: number): Promise<boolean> {
+        const openPositions = this.getOpenPositions();
+        if (openPositions.length === 0) return false;
+
+        // 1. Ordenar de peor a mejor EAR
+        openPositions.sort((a, b) => (a.expectedAnnualizedReturn || 0) - (b.expectedAnnualizedReturn || 0));
+
+        const worstPosition = openPositions[0];
+
+        // 2. Encontrar el PairManager
+        const manager = this.registeredManagers.find(m => m.pairId === worstPosition.pairId);
+        if (!manager) return false;
+
+        // 3. Simular la venta real en el Orderbook en vivo
+        const exitSimulation = manager.simulateExit(worstPosition.size);
+
+        // Si el libro está tan seco que no podemos vender ni siquiera una fracción útil, abortamos el relevo
+        if (exitSimulation.size === 0) return false;
+
+        // 4. Calcular el Peaje de Salida Real (Exit Toll)
+        // Lo que ganaríamos a vencimiento garantizado (1.00 por contrato) vs Lo que recuperamos vendiendo ahora al Bid
+        const maturityValue = exitSimulation.size * 1.00;
+        const realExitToll = maturityValue - exitSimulation.netRevenue;
+
+        // (Opcional, pero recomendado: Asume un tiempo de maduración promedio para que la comparación EAR tenga sentido temporal)
+        const assumedDaysHeld = 30;
+
+        // 5. Comparar Expectativas
+        const expectedProfitOld = worstPosition.totalCost * ((worstPosition.expectedAnnualizedReturn || 0) / 365) * assumedDaysHeld;
+        const expectedProfitNew = capitalNeeded * (newEAR / 365) * assumedDaysHeld;
+
+        // LA CONDICIÓN DE RELEVO:
+        if (expectedProfitNew > (expectedProfitOld + realExitToll)) {
+            logger.info(`[RELAY CHECK] ✅ Autorizado. Peaje real evaluado en el orderbook: $${realExitToll.toFixed(2)} para ${exitSimulation.size} contratos.`);
+            return true;
+        }
+
+        return false;
+    }
+
+    public async triggerBufferReplenishment(amountNeeded: number) {
+        const settings = await Settings.findOne();
+        const isPaper = settings?.isPaperTrading ?? true;
+
+        const openPositions = this.getOpenPositions();
+
+        // Ordenar de peor a mejor EAR (los más bajos primero)
+        openPositions.sort((a, b) => (a.expectedAnnualizedReturn || 0) - (b.expectedAnnualizedReturn || 0));
+
+        let cashRecovered = 0;
+
+        for (const worstPosition of openPositions) {
+            if (cashRecovered >= amountNeeded) break; // Si ya recuperamos lo necesario, paramos
+
+            const manager = this.registeredManagers.find(m => m.pairId === worstPosition.pairId);
+            if (!manager) continue;
+
+            logger.warn(`[RELAY] 🔄 Rellenando colchón. Liquidando peor posición: ${worstPosition.pairId} (EAR: ${(worstPosition.expectedAnnualizedReturn || 0).toFixed(3)})`);
+
+            // Para simplificar y no dejar "polvo" (dust), liquidamos la posición entera
+            const sizeToSell = worstPosition.size;
+
+            if (isPaper) {
+                // == SIMULACIÓN (PAPER TRADING) ==
+                // Como no tenemos el orderbook real cruzado aquí, aplicamos el peaje estándar del 2% 
+                // que definimos en evaluateRelayRotation sobre el precio de entrada para simular cruzar el spread.
+                const assumedPolyExitPrice = (worstPosition.polyCost / worstPosition.size) * 0.98;
+                const assumedKalshiExitPrice = (worstPosition.kalshiCost / worstPosition.size) * 0.98;
+
+                const assumedFees = Math.ceil(0.07 * sizeToSell * assumedKalshiExitPrice * (1 - assumedKalshiExitPrice) * 100) / 100;
+
+                this.closePosition(
+                    worstPosition.pairId, sizeToSell,
+                    assumedPolyExitPrice, assumedKalshiExitPrice, assumedFees
+                );
+
+                const recovered = (sizeToSell * assumedPolyExitPrice) + (sizeToSell * assumedKalshiExitPrice) - assumedFees;
+                cashRecovered += recovered;
+
+                logger.info(`[RELAY] ✅ Paper Exit completado. Recuperados ~$${recovered.toFixed(2)}`);
+            } else {
+                // == EJECUCIÓN REAL (LIVE ENGINE) ==
+                const polyAssetId = worstPosition.type.includes('PolyYes') ? manager.polyYesTokenId : manager.polyNoTokenId;
+                const kalshiSide = worstPosition.type.includes('KalshiYes') ? 'yes' : 'no';
+
+                // Asumimos que recuperaremos aproximadamente el coste para avanzar el bucle
+                cashRecovered += worstPosition.totalCost;
+
+                return {
+                    pairId: worstPosition.pairId,
+                    marketQuestion: worstPosition.marketQuestion,
+                    tradeType: worstPosition.type,
+                    targetSize: sizeToSell,
+                    polyAssetId: polyAssetId,
+                    kalshiTicker: manager.pairData.kalshiMarket.internal_id,
+                    kalshiSide: kalshiSide as 'yes' | 'no',
+                    polyMaxVwap: 0.01,
+                    kalshiMaxVwap: 0.01,
+                    isEntry: false,
+                    expectedEAR: 999, // Prioridad absoluta en la cola
+                    availableLiquidity: sizeToSell
+                }
+            }
+        }
+    }
 }

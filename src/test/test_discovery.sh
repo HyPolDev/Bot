@@ -27,11 +27,11 @@ read -p "Which checker would you like to run? Enter 'L' for LLM checker or 'M' f
 case "$choice" in 
   [lL]* ) 
     echo "Starting LLM checker..."
-    npx ts-node src/discovery/llm_checker.ts
+    npx tsx src/discovery/llm_checker.ts
     ;;
   [mM]* ) 
     echo "Starting Manual checker..."
-    npx ts-node src/discovery/manual_checker.ts
+    npx tsx src/discovery/manual_checker.ts
     ;;
   * ) 
     echo "No valid selection made. Exiting without running a checker."
