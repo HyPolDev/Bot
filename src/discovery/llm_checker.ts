@@ -3,6 +3,7 @@ import cliProgress from 'cli-progress';
 import path from 'path';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import axios from 'axios';
 import { DatabaseConnection } from '../db/connection.js';
 import { MarketPair } from '../db/models/MarketPair.js';
 
@@ -35,13 +36,81 @@ interface CandidatePair {
 }
 
 interface ValidatedPair extends CandidatePair {
-    outcomeAlignment: 1; // Strictly 1 now
+    outcomeAlignment: 1;
 }
 
 interface LLMResponseLog {
     polyMarketId: string;
     kalshiMarketId: string;
     alignment: 1 | 0;
+}
+
+// --- API Checkers for Live Status ---
+async function checkPolymarketActive(marketId: string): Promise<boolean> {
+    try {
+        const response = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`);
+        return response.data.active === true && response.data.closed === false;
+    } catch (error) {
+        // Fail-safe: if the API fails, keep the market in DB to avoid accidental deletion
+        return true;
+    }
+}
+
+async function checkKalshiActive(ticker: string): Promise<boolean> {
+    try {
+        const response = await axios.get(`https://api.elections.kalshi.com/trade-api/v2/markets/${ticker}`);
+        const status = response.data.market.status;
+        return status === 'active' || status === 'open';
+    } catch (error) {
+        return true;
+    }
+}
+
+// --- Database Cleanup Routine ---
+async function cleanupResolvedPairs() {
+    console.log(`\nStarting pre-flight cleanup of resolved market pairs...`);
+    const pairs = await MarketPair.find({});
+
+    if (pairs.length === 0) {
+        console.log(`Database is empty, no cleanup needed.`);
+        return;
+    }
+
+    const cleanupBar = new cliProgress.SingleBar({
+        format: 'DB Cleanup |{bar}| {percentage}% || {value}/{total} pairs || Removed: {removed}',
+        hideCursor: true,
+    }, cliProgress.Presets.shades_classic);
+
+    cleanupBar.start(pairs.length, 0, { removed: 0 });
+
+    let removedCount = 0;
+    let processedCount = 0;
+
+    // Process in sequential batches to avoid API rate limits on startup
+    for (const pair of pairs) {
+        // Assume internal_id stores the correct identifier for the respective API
+        const polyId = pair.polyMarket?.internal_id;
+        const kalshiId = pair.kalshiMarket?.internal_id;
+
+        if (polyId && kalshiId) {
+            const [isPolyActive, isKalActive] = await Promise.all([
+                checkPolymarketActive(polyId),
+                checkKalshiActive(kalshiId)
+            ]);
+
+            if (!isPolyActive || !isKalActive) {
+                await MarketPair.deleteOne({ _id: pair._id });
+                removedCount++;
+            }
+        }
+
+        processedCount++;
+        cleanupBar.update(processedCount, { removed: removedCount });
+        await sleep(50); // slight delay to respect platform rate limits during bulk checks
+    }
+
+    cleanupBar.stop();
+    console.log(`Cleanup complete. Removed ${removedCount} stale pairs from the database.\n`);
 }
 
 // --- OpenAI Client ---
@@ -121,7 +190,6 @@ ALIGNMENT MAPPING:
 
             const jsonResult = JSON.parse(content);
 
-            // Force strict 1 or 0
             if (jsonResult.alignment === 1) return { alignment: 1 };
             return { alignment: 0 };
 
@@ -157,7 +225,6 @@ async function run() {
 
     if (candidates.length === 0) return;
 
-    // --- LOAD REJECTED CACHE ---
     let rejectedCache = new Set<string>();
     if (fs.existsSync(rejectedCacheFile)) {
         try {
@@ -171,9 +238,13 @@ async function run() {
 
     const ai = buildOpenAI();
 
+    // 1. Connect to DB first
     await DatabaseConnection.getInstance().connect();
 
-    console.log(`\nStarting OpenAI verification for ${candidates.length} candidate pairs...`);
+    // 2. Run Database Cleanup to remove expired/resolved markets
+    await cleanupResolvedPairs();
+
+    console.log(`Starting OpenAI verification for ${candidates.length} candidate pairs...`);
     console.log(`Model: gpt-5-nano | Concurrency: ${MAX_CONCURRENT_REQUESTS} floating workers`);
     console.log(`Mode: STRICT EXACT MATCH (1) or REJECT (0)\n`);
 
@@ -194,23 +265,20 @@ async function run() {
         const worker = (async () => {
             const pairId = `${pair.kalshiMarket.internal_id}+${pair.polyMarket.internal_id}`;
 
-            // --- 1. CHECK REJECTED CACHE (Local File) ---
             if (rejectedCache.has(pairId)) {
                 processedCount++;
                 bar.update(processedCount, { confirmed: validatedPairs.length });
-                return; // Skip LLM completely
+                return;
             }
 
-            // --- 2. CHECK ACCEPTED CACHE (MongoDB) ---
             const alreadyInDb = await MarketPair.exists({ pairId });
             if (alreadyInDb) {
                 processedCount++;
                 validatedPairs.push({ ...pair, outcomeAlignment: 1 });
                 bar.update(processedCount, { confirmed: validatedPairs.length });
-                return; // Skip LLM completely
+                return;
             }
 
-            // --- 3. LLM CALL (Only if totally new) ---
             const res = await askLLM(ai, pair.polyMarket, pair.kalshiMarket);
 
             processedCount++;
@@ -222,7 +290,6 @@ async function run() {
             });
 
             if (res.alignment === 1) {
-                // Save Match to DB
                 validatedPairs.push({ ...pair, outcomeAlignment: 1 });
                 await MarketPair.findOneAndUpdate(
                     { pairId },
@@ -242,15 +309,11 @@ async function run() {
                     { upsert: true }
                 );
             } else {
-                // Save Rejection to Local Cache
                 rejectedCache.add(pairId);
-                // Serialize Set back to JSON Array
                 fs.writeFileSync(rejectedCacheFile, JSON.stringify(Array.from(rejectedCache), null, 2));
             }
 
             bar.update(processedCount, { confirmed: validatedPairs.length });
-
-            // Write LLM logs only when a new API call was made
             fs.writeFileSync(logsFile, JSON.stringify(llmLogs, null, 2));
         })();
 
