@@ -129,6 +129,7 @@ export class CLI {
                     } else if (key.name === 'return' || key.name === 'enter') {
                         const positions = this.portfolio.getOpenPositions();
                         if (positions.length > 0) {
+                            this.positionCursorIndex = Math.max(0, Math.min(this.positionCursorIndex, positions.length - 1));
                             this.activePosition = positions[this.positionCursorIndex];
                             this.activeManager = this.managers.find(m => m.pairId === this.activePosition!.pairId) || null;
                             this.viewState = ViewState.POSITION_LIVE;
@@ -208,6 +209,10 @@ export class CLI {
         this.clearScreenHelper();
 
         const positions = this.portfolio.getOpenPositions();
+
+        if (this.positionCursorIndex >= positions.length) {
+            this.positionCursorIndex = Math.max(0, positions.length - 1);
+        }
 
         let output = `\n=============================================================\n`;
         output += `                      ACTIVE POSITIONS (${positions.length})\n`;

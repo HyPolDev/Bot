@@ -190,8 +190,8 @@ export class PortfolioManager {
                                 kalshiCost: kalshiCost, // Pushing the blended cost to state
                                 totalCost: polyCost + kalshiCost,
                                 timestamp: Date.now(),
-                                expiringDate: pos?.expiringDate,
-                                expectedAnnualizedReturn: pos?.expectedAnnualizedReturn
+                                expiringDate: undefined,
+                                expectedAnnualizedReturn: undefined
                             });
                             logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize} | Poly @ ${polyEntryPrice.toFixed(3)} | Kalshi @ ${kalshiBlendedEntryPrice.toFixed(3)} (Inc. Est. Fees)`);
                         } else {
@@ -463,43 +463,54 @@ export class PortfolioManager {
         }
     }
 
-    public async evaluateRelayRotation(newEAR: number, capitalNeeded: number): Promise<boolean> {
+    public async evaluateRelayRotation(newCandidateAbsProfit: number, capitalNeeded: number): Promise<boolean> {
         const openPositions = this.getOpenPositions();
         if (openPositions.length === 0) return false;
 
-        // 1. Identificar la peor posición (menor EAR)
-        openPositions.sort((a, b) => (a.expectedAnnualizedReturn || 0) - (b.expectedAnnualizedReturn || 0));
+        // 1. Sort by absolute expected profit dynamically
+        // Expected Profit = (Guaranteed Payout of $1.00 * size) - totalCost
+        openPositions.sort((a, b) => {
+            const profitA = a.size - a.totalCost;
+            const profitB = b.size - b.totalCost;
+            return profitA - profitB;
+        });
+
         const worstPos = openPositions[0];
 
         const manager = this.registeredManagers.find(m => m.pairId === worstPos.pairId);
         if (!manager) return false;
 
-        // 2. Simular salida real
+        // 2. Simulate Exit to get real-world cash back (Bid prices)
         const exitSim = manager.simulateExit(worstPos.size);
         if (exitSim.size === 0) return false;
 
-        // 3. Calcular "Días a Vencimiento" REAL para comparar horizontes
-        const expirationMs = worstPos.expiringDate ? new Date(worstPos.expiringDate).getTime() : Date.now() + (30 * 86_400_000);
-        const daysToMaturity = Math.max(0.1, (expirationMs - Date.now()) / 86_400_000);
+        // 3. The Minimum Ticket Size (Stop trading dust)
+        const MIN_TRADE_VALUE = 0.05;
+        if (exitSim.netRevenue < MIN_TRADE_VALUE) {
+            logger.info(`[RELAY CHECK] ❌ RECHAZADO. Liquidating ${worstPos.pairId} frees $${exitSim.netRevenue.toFixed(2)}. Min required: $${MIN_TRADE_VALUE}.`);
+            return false;
+        }
 
-        // 4. Calcular el "Peaje de Salida" convertido a EAR (Penalización por vender temprano)
-        const maturityValue = exitSim.size * 1.00;
-        const netLossOnExit = maturityValue - exitSim.netRevenue;
-        
-        // El peaje es básicamente Profit que perdemos HOY. 
-        // Para que el relevo valga la pena, NewEAR debe cubrir:
-        // (OldEAR) + (EAR equivalente de la pérdida por salir del spread) + (Fricción de seguridad)
-        const exitTollEAR = (netLossOnExit / worstPos.totalCost) * (365 / daysToMaturity);
-        const switchingFriction = 0.10; // 10% de EAR extra exigido para evitar churn
+        // 4. Calculate Absolute Dollar Toll
+        const expectedProfitIfHeld = worstPos.size - worstPos.totalCost;
+        const realizedLossOnExit = worstPos.totalCost - exitSim.netRevenue;
 
-        const requiredNewEAR = (worstPos.expectedAnnualizedReturn || 0) + exitTollEAR + switchingFriction;
+        // Total cost of switching = The profit we gave up + the actual cash we lost to the spread
+        const totalSwitchingCost = expectedProfitIfHeld + realizedLossOnExit;
 
-        if (newEAR > requiredNewEAR) {
-            logger.info(`[RELAY CHECK] ✅ AUTORIZADO. New EAR (${(newEAR * 100).toFixed(1)}%) > Required (${(requiredNewEAR * 100).toFixed(1)}%). Toll EAR: ${(exitTollEAR * 100).toFixed(1)}%`);
+        // 5. The Absolute Switching Friction (Hurdle Rate)
+        // You can make this dynamic later (e.g., 2% of capitalNeeded), but static is safer for MVP
+        const ALPHA_HURDLE = 1.00;
+
+        // 6. The Ultimate Question
+        const requiredNewProfit = totalSwitchingCost + ALPHA_HURDLE;
+
+        if (newCandidateAbsProfit > requiredNewProfit) {
+            logger.info(`[RELAY CHECK] ✅ AUTORIZADO. New Profit ($${newCandidateAbsProfit.toFixed(2)}) > Required ($${requiredNewProfit.toFixed(2)}).`);
             return true;
         }
 
-        logger.info(`[RELAY CHECK] ❌ RECHAZADO. New EAR (${(newEAR * 100).toFixed(1)}%) insuficiente. Necesario: ${(requiredNewEAR * 100).toFixed(1)}%`);
+        logger.info(`[RELAY CHECK] ❌ RECHAZADO. New Profit ($${newCandidateAbsProfit.toFixed(2)}) insufficient. Necesario: $${requiredNewProfit.toFixed(2)}`);
         return false;
     }
 
@@ -513,7 +524,7 @@ export class PortfolioManager {
 
         const polyShortfall = Math.max(0, bufferPerExchange - this.polyCash);
         const kalshiShortfall = Math.max(0, bufferPerExchange - this.kalshiCash);
-        
+
         // Target: restore the buffer AND cover the trade cost that triggered this.
         const targetReplenishment = amountNeeded + polyShortfall + kalshiShortfall;
 
@@ -525,7 +536,7 @@ export class PortfolioManager {
         let cashRecovered = 0;
 
         for (const worstPosition of openPositions) {
-            if (cashRecovered >= targetReplenishment) break; 
+            if (cashRecovered >= targetReplenishment) break;
 
             const availableSize = worstPosition.size - (worstPosition.reservedSize || 0);
             if (availableSize <= 0) continue;
@@ -539,7 +550,7 @@ export class PortfolioManager {
 
             if (isPaper) {
                 const exitSim = manager.simulateExit(sizeToSell);
-                
+
                 // Fallback to a minor 5% spread loss if the orderbook is completely empty
                 const assumedPolyExitPrice = exitSim.size > 0 ? (exitSim.polyRevenue / exitSim.size) : (worstPosition.polyCost / worstPosition.size) * 0.95;
                 const assumedKalshiExitPrice = exitSim.size > 0 ? (exitSim.kalshiRevenue / exitSim.size) : (worstPosition.kalshiCost / worstPosition.size) * 0.95;
@@ -574,7 +585,7 @@ export class PortfolioManager {
                     polyMaxVwap: 0.01,
                     kalshiMaxVwap: 0.01,
                     isEntry: false,
-                    expectedEAR: 999, 
+                    expectedEAR: 999,
                     availableLiquidity: sizeToSell
                 }
             }
