@@ -2,6 +2,7 @@ import { ExecutionPayload, ExecutionReceipt } from './types.js';
 import { PolyClient } from './poly_client.js';
 import { KalshiClient } from './kalshi_client.js';
 import { logger } from '../utils/logger.js';
+import { Trade } from '../db/models/Trade.js';
 
 // Assume PortfolioManager can be injected or imported. Using basic logging for now.
 // import { PortfolioManager } from '../portfolio/portfolio_manager.js';
@@ -27,15 +28,22 @@ export class LiveEngine {
         this.kalshiClient = new KalshiClient();
         this.portfolioManager = portfolioManager;
 
-        // Attach physical exchange clients to the ledger to prevent api drift
-        if (this.portfolioManager && typeof this.portfolioManager.attachExchangeClients === 'function') {
-            this.portfolioManager.attachExchangeClients(this.polyClient, this.kalshiClient);
-        }
+        this.initExchangeClients();
 
         this.maxPositionSize = parseInt(process.env.MAX_POSITION_SIZE || '50', 10);
 
         // Start the background execution queue processor
         setInterval(() => this.processQueue(), 100);
+    }
+
+    private async initExchangeClients() {
+        try {
+            if (this.portfolioManager && typeof this.portfolioManager.attachExchangeClients === 'function') {
+                await this.portfolioManager.attachExchangeClients(this.polyClient, this.kalshiClient);
+            }
+        } catch (error) {
+            logger.error(`[LiveEngine] Failed to attach exchange clients:`, error);
+        }
     }
 
     public queueOrder(payload: ExecutionPayload): void {
@@ -53,11 +61,11 @@ export class LiveEngine {
         this.lastExecutionTime = now;
 
         try {
-            // Priority Sort: (1) Spread Margin [Higher is better] (2) Available Liquidity [Higher is better]
+            // Priority Sort: (1) Expected Annualized Return [Higher is better] (2) Available Liquidity [Higher is better]
             this.tradeQueue.sort((a, b) => {
-                const marginA = a.spreadMargin || 0;
-                const marginB = b.spreadMargin || 0;
-                if (marginB !== marginA) return marginB - marginA;
+                const earA = a.expectedEAR || 0;
+                const earB = b.expectedEAR || 0;
+                if (earB !== earA) return earB - earA;
 
                 const liqA = a.availableLiquidity || 0;
                 const liqB = b.availableLiquidity || 0;
@@ -192,10 +200,11 @@ export class LiveEngine {
                             finalSize,
                             polyPrice,
                             kalshiPrice,
-                            kalshiFeeAmount
+                            kalshiFeeAmount,
+                            payload.expectedEAR,
+                            payload.expiringDate
                         );
                     } else {
-                        // It's a SELL order, so we CLOSE the position to realize profits
                         this.portfolioManager.closePosition(
                             payload.pairId,
                             finalSize,
@@ -204,6 +213,17 @@ export class LiveEngine {
                             kalshiFeeAmount
                         );
                     }
+
+                    // Asynchronously Push to the Physical DB Trade Ledger
+                    Trade.create({
+                        pairId: payload.pairId,
+                        marketQuestion: payload.marketQuestion,
+                        type: payload.isEntry ? 'buy' : 'sell',
+                        polyQuantity: finalSize,
+                        kalshiQuantity: finalSize,
+                        averagePolyPrice: polyPrice,
+                        averageKalshiPrice: kalshiPrice + (kalshiFeeAmount / finalSize) // Bake the fee slippage into the true Kalshi fill price
+                    }).catch(e => logger.error(`[LIVE ENGINE] Error persisting Trade to DB: ${e.message}`));
                 }
 
                 // Fetch the true physical state directly from the exchanges to correct any precision or fee slippage
@@ -254,21 +274,9 @@ export class LiveEngine {
     }
 
     private calculateKalshiTakerFee(executedPrice: number, size: number): number {
-        // Kalshi Dynamic Taker Fee Calculation (Post-execution)
-        // Let's assume price is in dollars (e.g. 0.52). Convert to cents for calculation.
-        const priceCents = Math.round(executedPrice * 100);
-
-        let feePerContractCents = 0;
-        // Typically, Kalshi taker limit fees are around ~7% of the smaller probability (price or 100-price)
-        // or a flat minimal fee. This varies slightly with new tiers. 
-        // Using a standard placeholder calculation:
-        const minProb = Math.min(priceCents, 100 - priceCents);
-        feePerContractCents = Math.floor(minProb * 0.07); // ~7% of the implied probability 
-
-        // Cap or specifics can be added here
-
-        const totalFeeCents = feePerContractCents * size;
-        return totalFeeCents / 100; // Return in dollars
+        // Canonical Kalshi taker fee: ceil(0.07 * totalContracts * P * (1-P))
+        // Applied once to the full block — consistent with entry-side fee calculation in PairManager.
+        return Math.ceil(0.07 * size * executedPrice * (1 - executedPrice) * 100) / 100;
     }
 
     private triggerEmergencyHedge(exchange: 'Polymarket' | 'Kalshi', assetIdentifier: string, originalEntry: boolean, size: number, kalshiSide: 'yes' | 'no' = 'yes') {
@@ -294,3 +302,6 @@ export class LiveEngine {
         });
     }
 }
+
+
+

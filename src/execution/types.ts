@@ -9,8 +9,9 @@ export interface ExecutionPayload {
     polyMaxVwap: number;       // e.g., 0.45
     kalshiMaxVwap: number;     // e.g., 0.52
     isEntry: boolean;          // true = BUY, false = SELL
-    spreadMargin?: number;     // Profit margin for ranking
+    expectedEAR?: number;      // Expected Annualized Return for queue priority ranking
     availableLiquidity?: number; // Orderbook depth for ranking
+    expiringDate?: any;
 }
 
 export type ExecutionStatus = 'filled' | 'canceled' | 'failed';

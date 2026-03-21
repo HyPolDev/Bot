@@ -167,7 +167,7 @@ async function run() {
     const groupedMarkets = await matcher.processAllMarkets(markets, 0.90);
 
     // Apply the Time Filter
-    const timeFilteredMarkets = filterByExpirationWindow(groupedMarkets, 24);
+    const timeFilteredMarkets = filterByExpirationWindow(groupedMarkets, 2);
 
     console.log(`\nRanking ${timeFilteredMarkets.length} candidates by similarity and expiration date...`);
 

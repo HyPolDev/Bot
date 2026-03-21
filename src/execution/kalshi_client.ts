@@ -72,7 +72,6 @@ export class KalshiClient {
     public async placeAggressiveLimit(ticker: string, side: 'yes' | 'no', isEntry: boolean, size: number, maxVwap: number): Promise<ExecutionReceipt> {
         const timestamp = Date.now();
         const action = isEntry ? 'buy' : 'sell';
-        const yesPriceCents = Math.floor(maxVwap * 100);
         const clientOrderId = crypto.randomUUID();
 
         const endpoint = '/portfolio/orders';
@@ -93,10 +92,11 @@ export class KalshiClient {
                     action: action,
                     side: side,
                     ticker: ticker,
-                    count: size,
+                    count_fp: size, // CHANGED: Use count_fp for fractional support
                     client_order_id: clientOrderId,
                     type: 'limit',
-                    ...(side === 'yes' ? { yes_price: yesPriceCents } : { no_price: yesPriceCents }),
+                    // CHANGED: Send string-based dollar prices instead of integer cents
+                    ...(side === 'yes' ? { yes_price_dollars: maxVwap.toString() } : { no_price_dollars: maxVwap.toString() }),
                     time_in_force: 'fill_or_kill'
                 })
             });
@@ -120,8 +120,12 @@ export class KalshiClient {
                     exchange: 'Kalshi',
                     status: 'filled',
                     orderId: orderId,
-                    executedPrice: (orderInfo.yes_price || yesPriceCents) / 100,
-                    executedSize: orderInfo.actual_count || size
+                    // CHANGED: Parse the string dollar value natively, with a fallback
+                    executedPrice: orderInfo.yes_price_dollars
+                        ? parseFloat(orderInfo.yes_price_dollars)
+                        : (orderInfo.yes_price || Math.floor(maxVwap * 100)) / 100,
+                    // CHANGED: Check for actual_count_fp first
+                    executedSize: orderInfo.actual_count_fp || orderInfo.actual_count || size
                 };
             } else if (status === 'canceled') {
                 return {
@@ -170,9 +174,9 @@ export class KalshiClient {
                     action: action,
                     side: side,
                     ticker: ticker,
-                    count: size,
+                    count_fp: size, // CHANGED: Use count_fp for fractional support
                     client_order_id: clientOrderId,
-                    type: 'market' // Native market order type
+                    type: 'market'
                 })
             });
 
@@ -195,8 +199,9 @@ export class KalshiClient {
                     exchange: 'Kalshi',
                     status: 'filled',
                     orderId: orderId,
-                    executedPrice: 0, // Unfilled info natively until queried, but executed
-                    executedSize: orderInfo.actual_count || size
+                    executedPrice: 0,
+                    // CHANGED: Check for actual_count_fp first
+                    executedSize: orderInfo.actual_count_fp || orderInfo.actual_count || size
                 };
             } else if (status === 'canceled') {
                 return {
@@ -225,11 +230,14 @@ export class KalshiClient {
     public async getOpenPositions(): Promise<{ ticker: string, position: number, market_exposure: number, fees_paid: number, total_traded: number }[]> {
         const timestamp = Date.now();
         const endpoint = '/portfolio/positions';
-        const signaturePath = `/trade-api/v2${endpoint}`;
+        const query = '?count_filter=position'; // Define query explicitly
+        const signaturePath = `/trade-api/v2${endpoint}${query}`; // Include query in signature
 
         try {
             const signature = this.sign(timestamp, 'GET', signaturePath);
-            const response = await fetch(`${this.baseUrl}${endpoint}`, {
+            const url = `${this.baseUrl}${endpoint}${query}`; // Use the exact same path
+
+            const response = await fetch(url, {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json',
@@ -246,17 +254,26 @@ export class KalshiClient {
             }
 
             const data = await response.json();
-            const positions = data.market_positions || data.positions || [];
+            const rawPositions = data.market_positions || data.positions || data.event_positions || [];
 
-            return positions
-                .filter((p: any) => p.position !== 0)
-                .map((p: any) => ({
-                    ticker: p.ticker,
-                    position: p.position,
-                    market_exposure: p.market_exposure || 0,       // cents
-                    fees_paid: p.fees_paid || 0,                   // cents
-                    total_traded: p.total_traded || 0              // cents
-                }));
+            const toNum = (v: any) => {
+                const n = typeof v === 'string' ? Number(v) : Number(v);
+                return Number.isFinite(n) ? n : 0;
+            };
+
+            return rawPositions
+                .map((p: any) => {
+                    const position = toNum(p.position ?? p.position_fp ?? p.net_position ?? p.count ?? p.open_count ?? 0);
+                    const ticker = p.ticker ?? p.market_ticker ?? p.market?.ticker ?? p.event_ticker ?? '';
+                    return {
+                        ticker,
+                        position,
+                        market_exposure: toNum(p.market_exposure ?? p.market_exposure_dollars ?? p.exposure ?? 0),
+                        fees_paid: toNum(p.fees_paid ?? p.fees_paid_dollars ?? p.fees ?? 0),
+                        total_traded: toNum(p.total_traded ?? p.total_traded_cents ?? p.volume_traded ?? 0)
+                    };
+                })
+                .filter((p: any) => p.ticker && Number.isFinite(p.position) && p.position !== 0);
         } catch (error: any) {
             console.error(`[KalshiClient] getOpenPositions error:`, error.message);
             return [];

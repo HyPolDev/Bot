@@ -4,6 +4,20 @@ import path from 'path';
 // Helper function to replicate time.sleep()
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+const toNum = (v: any): number => {
+    if (v === null || v === undefined) return NaN;
+    const n = typeof v === 'string' ? Number(v) : Number(v);
+    return Number.isFinite(n) ? n : NaN;
+};
+
+const firstFinite = (...vals: any[]): number => {
+    for (const v of vals) {
+        const n = toNum(v);
+        if (Number.isFinite(n)) return n;
+    }
+    return NaN;
+};
+
 async function getAllActiveKalshiMarkets() {
     // Kalshi V2 public API endpoint for markets
     const baseUrl = "https://api.elections.kalshi.com/trade-api/v2/markets";
@@ -18,8 +32,12 @@ async function getAllActiveKalshiMarkets() {
         "Content-Type": "application/json"
     };
 
+    const minLiquidity = 10000;
+    let missingLiquidity = 0;
+    let belowThreshold = 0;
+
     console.log("Starting fetch of ALL active Kalshi markets...");
-    console.log("Strategy: Using cursor-based pagination. Filtering for volume > 10000.");
+    console.log(`Strategy: Using cursor-based pagination. Filtering for liquidity >= ${minLiquidity}.`);
     console.log("-".repeat(60));
 
     while (true) {
@@ -61,11 +79,27 @@ async function getAllActiveKalshiMarkets() {
                 if (!marketIds.has(mId)) {
                     marketIds.add(mId);
 
-                    // --- THE DIFFERENCE ---
-                    // Parse volume safely and check if it's over 10,000
-                    const volume = parseFloat(market.volume || "0");
-                    if (volume > 10000) {
+                    // Prefer explicit liquidity/open interest/volume fields if present
+                    const liquidityMetric = firstFinite(
+                        market.liquidity,
+                        market.open_interest,
+                        market.volume_24h,
+                        market.volume_fp,
+                        market.volume_usd,
+                        market.total_volume
+                    );
+
+                    if (!Number.isFinite(liquidityMetric)) {
+                        missingLiquidity++;
+                        continue;
+                    }
+
+                    if (liquidityMetric >= minLiquidity) {
+                        // add a normalized field for downstream debugging/CSV
+                        market.liquidity_metric = liquidityMetric;
                         allMarkets.push(market);
+                    } else {
+                        belowThreshold++;
                     }
                 } else {
                     duplicatesInBatch++;
@@ -76,7 +110,7 @@ async function getAllActiveKalshiMarkets() {
             cursor = data.cursor || null;
 
             // Progress Indicator
-            process.stdout.write(`\rHigh Vol Markets: ${allMarkets.length.toString().padEnd(5)} | Duplicates skipped: ${duplicatesInBatch}`);
+            process.stdout.write(`\rHigh Liquidity Markets: ${allMarkets.length.toString().padEnd(5)} | Missing liquidity: ${missingLiquidity.toString().padEnd(5)} | Below threshold: ${belowThreshold.toString().padEnd(5)} | Duplicates skipped: ${duplicatesInBatch}`);
 
             if (!cursor) {
                 console.log("\nReached the final page of results.");
@@ -93,12 +127,13 @@ async function getAllActiveKalshiMarkets() {
     }
 
     // --- POST-PROCESSING ---
-    console.log(`\n\nTotal High Volume (>10k) Active Markets Found: ${allMarkets.length}`);
+    console.log(`\n\nTotal High Liquidity (>= ${minLiquidity}) Active Markets Found: ${allMarkets.length}`);
+    console.log(`Missing liquidity field count: ${missingLiquidity}`);
 
-    console.log("Sorting data by Volume for CSV export...");
+    console.log("Sorting data by Liquidity metric for CSV export...");
     allMarkets.sort((a, b) => {
-        const volA = parseFloat(a.volume || "0");
-        const volB = parseFloat(b.volume || "0");
+        const volA = toNum(a.liquidity_metric ?? a.volume ?? a.volume_24h ?? 0) || 0;
+        const volB = toNum(b.liquidity_metric ?? b.volume ?? b.volume_24h ?? 0) || 0;
         return volB - volA; // Sort descending
     });
 
@@ -117,7 +152,7 @@ async function getAllActiveKalshiMarkets() {
 
             // 2. Sort fields and prioritize key columns for Kalshi
             const sortedFields = Array.from(fieldnames).sort();
-            const priorityCols = ['ticker', 'event_ticker', 'title', 'subtitle', 'volume', 'close_time'];
+            const priorityCols = ['ticker', 'event_ticker', 'title', 'subtitle', 'liquidity_metric', 'liquidity', 'open_interest', 'volume_24h', 'volume', 'close_time'];
 
             for (const col of priorityCols.reverse()) {
                 const index = sortedFields.indexOf(col);
@@ -151,7 +186,7 @@ async function getAllActiveKalshiMarkets() {
             fs.writeFileSync(csvFilename, csvRows.join('\n'), 'utf-8');
             console.log(`Success! Saved ${allMarkets.length} markets to '${csvFilename}'`);
         } else {
-            console.log("No markets met the 10,000 volume threshold. No CSV created.");
+            console.log("No markets met the liquidity threshold. No CSV created.");
         }
     } catch (error) {
         console.error("\nError saving to CSV:", error);

@@ -1,5 +1,9 @@
-import * as fs from 'fs';
 import { logger } from '../utils/logger.js';
+import { SimulatedPosition } from '../db/models/SimulatedPosition.js';
+import { Position as PositionModel } from '../db/models/Position.js';
+import { SimulatedTrade } from '../db/models/SimulatedTrade.js';
+import { Settings } from '../db/models/Settings.js';
+import { RiskManager } from './risk_manager.js';
 
 export interface Position {
     pairId: string;
@@ -12,6 +16,9 @@ export interface Position {
     kalshiCost: number;
     totalCost: number;
     timestamp: number;
+    expiringDate: any;
+    expectedAnnualizedReturn: number | undefined;
+    reservedSize?: number; // In-flight sales to prevent double-selling
 }
 
 export class PortfolioManager {
@@ -38,112 +45,59 @@ export class PortfolioManager {
         logger.info(`[Portfolio] Initialized statically. Awaiting Live Sync...`);
     }
 
-    public attachExchangeClients(polyClient: any, kalshiClient: any) {
+    public async attachExchangeClients(polyClient: any, kalshiClient: any) {
         this.polyClient = polyClient;
         this.kalshiClient = kalshiClient;
 
-        // Reconstruct State BEFORE starting the interval sync
-        this.recoverPositionsFromLedger();
+        const settings = await Settings.findOne();
+        if (settings && settings.isPaperTrading) {
+            logger.info(`[Portfolio] Paper Trading active. Skipping live physical balance and position sync intervals.`);
+            return;
+        }
 
         // Immediately sync and then sync every 60 seconds
         this.syncBalances();
         setInterval(() => this.syncBalances(), 60000);
     }
 
-    public recoverPositionsFromLedger() {
+    public async initializePaperTrading() {
         try {
-            if (!fs.existsSync('portfolio_ledger.txt')) return;
+            const settings = await Settings.findOne();
+            if (settings && settings.isPaperTrading) {
+                logger.info(`[Portfolio] Paper Trading Enabled. Fetching simulated balances and positions...`);
 
-            const ledgerData = fs.readFileSync('portfolio_ledger.txt', 'utf8');
-            const lines = ledgerData.split('\n');
+                // Hardcoded initial simulated balances (or could be moved to Settings later)
+                this.polyCash = 100;
+                this.kalshiCash = 100;
 
-            let currentAction: string | null = null;
-            let currentMarket: string | null = null;
-            let currentSize: number = 0;
-            let currentCost: number = 0;
-            let currentType: string = '';
+                const dbPositions = await SimulatedPosition.find({ state: 'open' });
+                for (const pos of dbPositions) {
+                    const totalCost = (pos.averagePolyPrice * pos.polymarketQuantity) +
+                        (pos.averageKalshiPrice * pos.kalshiQuantity) +
+                        pos.exitFees;
 
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-                if (line.includes('LEDGER OPEN:') || line.includes('LEDGER ADD:') || line.includes('LEDGER CLOSE:')) {
-                    const match = line.match(/LEDGER (OPEN|ADD|CLOSE):\s+(.*?)(\.\.\.)?$/);
-                    if (match) {
-                        currentAction = match[1];
-                        currentMarket = match[2].trim();
-                    }
-                } else if (line.includes('Action Size:') || line.includes('Size:')) {
-                    if (currentAction === 'OPEN' || currentAction === 'ADD') {
-                        const match = line.match(/Action Size:\s+\+(\d+)\s+\|\s+Action Cost:\s+\$([\d.]+)\s+\|\s+Type:\s+(\w+)/);
-                        if (match) {
-                            currentSize = parseInt(match[1], 10);
-                            currentCost = parseFloat(match[2]);
-                            currentType = match[3];
+                    this.polyCash -= (pos.averagePolyPrice * pos.polymarketQuantity);
+                    this.kalshiCash -= (pos.averageKalshiPrice * pos.kalshiQuantity + pos.exitFees);
 
-                            const pairId = Buffer.from(currentMarket!).toString('base64');
-
-                            let avgEntry = 0;
-                            const nextLine = lines[i + 1] || '';
-                            const avgMatch = nextLine.match(/Avg Entry:\s+([\d.]+)/);
-                            if (avgMatch) {
-                                avgEntry = parseFloat(avgMatch[1]);
-                            }
-
-                            const oldPos = this.openPositions.get(pairId);
-                            const oldSize = oldPos ? oldPos.size : 0;
-                            const oldAvgEntry = oldPos ? (oldPos.polyEntryPrice + oldPos.kalshiEntryPrice) : 0;
-
-                            const newTotalSize = oldSize + currentSize;
-                            let actionEntryPrice = 0;
-                            if (avgEntry > 0) {
-                                actionEntryPrice = (avgEntry * newTotalSize - oldAvgEntry * oldSize) / currentSize;
-                            } else {
-                                actionEntryPrice = currentCost / currentSize;
-                            }
-
-                            const rawExecutionCost = actionEntryPrice * currentSize;
-                            let actionFees = currentCost - rawExecutionCost;
-                            if (actionFees < 0) actionFees = 0;
-
-                            this.openPosition(
-                                pairId,
-                                currentMarket!,
-                                currentType,
-                                currentSize,
-                                actionEntryPrice / 2, // Poly allocation
-                                actionEntryPrice / 2, // kalshi allocation 
-                                actionFees // properly extracted Kalshi taker fees!
-                            );
-                        }
-                    } else if (currentAction === 'CLOSE') {
-                        const match = line.match(/Size:\s+(\d+)\s+\|\s+Type:\s+(\w+)/);
-                        if (match) {
-                            currentSize = parseInt(match[1], 10);
-                            const pairId = Buffer.from(currentMarket!).toString('base64');
-
-                            const pos = this.openPositions.get(pairId);
-                            if (pos) {
-                                if (currentSize >= pos.size) {
-                                    this.openPositions.delete(pairId);
-                                } else {
-                                    const oldSize = pos.size;
-                                    pos.size -= currentSize;
-                                    pos.polyCost -= (currentSize * (pos.polyCost / oldSize));
-                                    pos.kalshiCost -= (currentSize * (pos.kalshiCost / oldSize));
-                                    pos.totalCost -= (currentSize * (pos.totalCost / oldSize));
-                                }
-                            }
-                        }
-                    }
+                    this.openPositions.set(pos.pairId, {
+                        pairId: pos.pairId,
+                        marketQuestion: pos.marketQuestion,
+                        type: pos.type as string,
+                        size: pos.polymarketQuantity, // Assuming sizes match
+                        polyEntryPrice: pos.averagePolyPrice,
+                        kalshiEntryPrice: pos.averageKalshiPrice,
+                        polyCost: pos.averagePolyPrice * pos.polymarketQuantity,
+                        kalshiCost: pos.averageKalshiPrice * pos.kalshiQuantity + pos.exitFees,
+                        totalCost,
+                        timestamp: Date.now(), // Could use createdAt from DB
+                        expiringDate: pos.expiringDate,
+                        expectedAnnualizedReturn: pos.expectedAnnualizedReturn
+                    });
                 }
+                logger.info(`[Portfolio] Restored ${dbPositions.length} simulated positions. Simulated Balances -> Poly: $${this.polyCash.toFixed(2)} | Kalshi: $${this.kalshiCash.toFixed(2)}`);
             }
-
-            const restoredCount = this.openPositions.size;
-            if (restoredCount > 0) {
-                logger.info(`[Portfolio] 🔄 LEDGER RECOVERY COMPLETE: Restored ${restoredCount} active positions into memory.`);
-            }
-
         } catch (error) {
-            logger.error(`[Portfolio] ⚠️ Failed to recover state from ledger! System booting fresh.`, error);
+            logger.error(`[Portfolio] Error initializing paper trading state from DB:`, error);
         }
     }
 
@@ -235,7 +189,9 @@ export class PortfolioManager {
                                 polyCost: polyCost,
                                 kalshiCost: kalshiCost, // Pushing the blended cost to state
                                 totalCost: polyCost + kalshiCost,
-                                timestamp: Date.now()
+                                timestamp: Date.now(),
+                                expiringDate: undefined,
+                                expectedAnnualizedReturn: undefined
                             });
                             logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize} | Poly @ ${polyEntryPrice.toFixed(3)} | Kalshi @ ${kalshiBlendedEntryPrice.toFixed(3)} (Inc. Est. Fees)`);
                         } else {
@@ -314,6 +270,16 @@ export class PortfolioManager {
         return position ? position.totalCost : 0;
     }
 
+    public getOperationalPolyCash(riskManager: RiskManager): number {
+        const buffer = riskManager.getMaxTradeBudget();
+        return Math.max(0, this.polyCash - buffer);
+    }
+
+    public getOperationalKalshiCash(riskManager: RiskManager): number {
+        const buffer = riskManager.getMaxTradeBudget();
+        return Math.max(0, this.kalshiCash - buffer);
+    }
+
     // Safety Orchestration: Pair Banning
     public banPair(pairId: string, durationMs: number = 600000): void {
         const unbanTime = Date.now() + durationMs;
@@ -336,15 +302,15 @@ export class PortfolioManager {
 
     public openPosition(
         pairId: string, marketQuestion: string, type: string, size: number,
-        polyPrice: number, kalshiPrice: number, kalshiFees: number
-    ) {
+        polyPrice: number, kalshiPrice: number, kalshiFees: number, EAR: number, expiringDate: any
+    ): boolean {
         const polyCost = size * polyPrice;
         const kalshiCost = size * kalshiPrice;
         const totalCost = polyCost + kalshiCost + kalshiFees;
 
         if (polyCost > this.polyCash || (kalshiCost + kalshiFees) > this.kalshiCash) {
             logger.error(`[Portfolio] FATAL: Insufficient funds! PolyCost: ${polyCost}, KalshiReq: ${kalshiCost + kalshiFees}`);
-            return;
+            return false;
         }
 
         if (this.openPositions.has(pairId)) {
@@ -362,8 +328,8 @@ export class PortfolioManager {
             this.polyCash -= polyCost;
             this.kalshiCash -= (kalshiCost + kalshiFees); // FIX: Deduct the fee from the wallet!
 
-            this.logLedgerEvent(`ADD`, pos, 0, 0, size, totalCost);
-            return;
+            this.persistPositionOpen(pos, totalCost, kalshiFees);
+            return true;
         }
 
         const newPosition: Position = {
@@ -372,21 +338,55 @@ export class PortfolioManager {
             polyCost,
             kalshiCost: kalshiCost + kalshiFees, // Include fees in the tracker
             totalCost,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            expiringDate,
+            expectedAnnualizedReturn: EAR
         };
 
         this.openPositions.set(pairId, newPosition);
         this.polyCash -= polyCost;
         this.kalshiCash -= (kalshiCost + kalshiFees);
 
-        this.logLedgerEvent(`OPEN`, newPosition, 0, 0, size, totalCost);
+        this.persistPositionOpen(newPosition, totalCost, kalshiFees);
+        return true;
+    }
+
+    private async persistPositionOpen(pos: Position, totalCost: number, kalshiFees: number) {
+        try {
+            const settings = await Settings.findOne();
+            const isPaperTrading = settings?.isPaperTrading ?? true;
+            const Model = isPaperTrading ? SimulatedPosition : PositionModel;
+
+            await (Model as any).findOneAndUpdate(
+                { pairId: pos.pairId, state: 'open' },
+                {
+                    $set: {
+                        marketQuestion: pos.marketQuestion,
+                        type: pos.type,
+                        averagePolyPrice: pos.polyEntryPrice,
+                        polymarketQuantity: pos.size,
+                        averageKalshiPrice: pos.kalshiEntryPrice,
+                        kalshiQuantity: pos.size
+                    },
+                    $inc: { exitFees: kalshiFees },
+                    $setOnInsert: {
+                        expiringDate: pos.expiringDate,
+                        expectedAnnualizedReturn: pos.expectedAnnualizedReturn,
+                        state: 'open'
+                    }
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+        } catch (error) {
+            logger.error(`[Portfolio] Error saving Position to DB:`, error);
+        }
     }
 
     public closePosition(
         pairId: string, exitSize: number, polyExitPrice: number, kalshiExitPrice: number, kalshiExitFees: number
-    ) {
+    ): boolean {
         const position = this.openPositions.get(pairId);
-        if (!position) return;
+        if (!position) return false;
 
         const actualExitSize = Math.min(exitSize, position.size);
 
@@ -410,31 +410,185 @@ export class PortfolioManager {
             const oldSize = position.size;
             position.size -= actualExitSize;
 
+            if (position.reservedSize) {
+                position.reservedSize = Math.max(0, position.reservedSize - actualExitSize);
+            }
+
             // Proportionally reduce the internal trackers
             position.polyCost -= (actualExitSize * (position.polyCost / oldSize));
             position.kalshiCost -= (actualExitSize * (position.kalshiCost / oldSize));
             position.totalCost -= costBasis;
         }
 
-        const logPosition = { ...position, size: actualExitSize };
-        this.logLedgerEvent(`CLOSE`, logPosition, pnl, totalRevenue);
+        // --- Simulated Trade Persistence (Exits) ---
+        Settings.findOne().then(settings => {
+            if (settings && settings.isPaperTrading) {
+                SimulatedTrade.create({
+                    pairId: pairId,
+                    marketQuestion: position.marketQuestion,
+                    type: 'sell',
+                    polyQuantity: actualExitSize,
+                    kalshiQuantity: actualExitSize,
+                    averagePolyPrice: polyExitPrice,
+                    // Subvolve individual cost but log absolute exit data
+                    averageKalshiPrice: kalshiExitPrice - (kalshiExitFees / actualExitSize)
+                }).catch(e => logger.error(`[Portfolio] Error persisting Simulated SELL Trade: ${e.message}`));
+            }
+        });
+
+        this.persistPositionClose(pairId, actualExitSize, actualExitSize === position.size ? 0 : position.size);
+        return true;
     }
 
-    private logLedgerEvent(action: string, position: Position, pnl: number = 0, revenue: number = 0, addedSize: number = 0, addedCost: number = 0) {
-        const time = new Date().toISOString();
-        let msg = `[${time}] LEDGER ${action}: ${position.marketQuestion.substring(0, 50)}...\n`;
+    private async persistPositionClose(pairId: string, exitSize: number, remainingSize: number) {
+        try {
+            const settings = await Settings.findOne();
+            const isPaperTrading = settings?.isPaperTrading ?? true;
+            const Model = isPaperTrading ? SimulatedPosition : PositionModel;
 
-        if (action === 'OPEN' || action === 'ADD') {
-            msg += `  Action Size: +${addedSize} | Action Cost: $${addedCost.toFixed(2)} | Type: ${position.type}\n`;
-            msg += `  Total Position Size: ${position.size} | Avg Entry: ${(position.polyEntryPrice + position.kalshiEntryPrice).toFixed(3)}\n`;
-            msg += `  New Balances: Poly $${this.polyCash.toFixed(2)} | Kalshi $${this.kalshiCash.toFixed(2)}\n`;
-        } else {
-            msg += `  Size: ${position.size} | Type: ${position.type}\n`;
-            msg += `  Exit Revenue: $${revenue.toFixed(2)} | PnL: $${pnl.toFixed(2)}\n`;
-            msg += `  Total Equity: $${this.getTotalEquity().toFixed(2)}\n`;
+            const dbPos = await (Model as any).findOne({ pairId, state: 'open' });
+            if (dbPos) {
+                if (remainingSize <= 0) {
+                    dbPos.state = 'closed';
+                    await dbPos.save();
+                } else {
+                    // Partial close
+                    dbPos.polymarketQuantity = remainingSize;
+                    dbPos.kalshiQuantity = remainingSize;
+                    await dbPos.save();
+                }
+            }
+        } catch (error) {
+            logger.error(`[Portfolio] Error closing Position in DB:`, error);
         }
-        msg += `--------------------------------------------------\n`;
+    }
 
-        fs.appendFileSync('portfolio_ledger.txt', msg, 'utf8');
+    public async evaluateRelayRotation(newCandidateAbsProfit: number, capitalNeeded: number): Promise<boolean> {
+        const openPositions = this.getOpenPositions();
+        if (openPositions.length === 0) return false;
+
+        // 1. Sort by absolute expected profit dynamically
+        // Expected Profit = (Guaranteed Payout of $1.00 * size) - totalCost
+        openPositions.sort((a, b) => {
+            const profitA = a.size - a.totalCost;
+            const profitB = b.size - b.totalCost;
+            return profitA - profitB;
+        });
+
+        const worstPos = openPositions[0];
+
+        const manager = this.registeredManagers.find(m => m.pairId === worstPos.pairId);
+        if (!manager) return false;
+
+        // 2. Simulate Exit to get real-world cash back (Bid prices)
+        const exitSim = manager.simulateExit(worstPos.size);
+        if (exitSim.size === 0) return false;
+
+        // 3. The Minimum Ticket Size (Stop trading dust)
+        const MIN_TRADE_VALUE = 0.05;
+        if (exitSim.netRevenue < MIN_TRADE_VALUE) {
+            logger.info(`[RELAY CHECK] ❌ RECHAZADO. Liquidating ${worstPos.pairId} frees $${exitSim.netRevenue.toFixed(2)}. Min required: $${MIN_TRADE_VALUE}.`);
+            return false;
+        }
+
+        // 4. Calculate Absolute Dollar Toll
+        const expectedProfitIfHeld = worstPos.size - worstPos.totalCost;
+        const realizedLossOnExit = worstPos.totalCost - exitSim.netRevenue;
+
+        // Total cost of switching = The profit we gave up + the actual cash we lost to the spread
+        const totalSwitchingCost = expectedProfitIfHeld + realizedLossOnExit;
+
+        // 5. The Absolute Switching Friction (Hurdle Rate)
+        // You can make this dynamic later (e.g., 2% of capitalNeeded), but static is safer for MVP
+        const ALPHA_HURDLE = 1.00;
+
+        // 6. The Ultimate Question
+        const requiredNewProfit = totalSwitchingCost + ALPHA_HURDLE;
+
+        if (newCandidateAbsProfit > requiredNewProfit) {
+            logger.info(`[RELAY CHECK] ✅ AUTORIZADO. New Profit ($${newCandidateAbsProfit.toFixed(2)}) > Required ($${requiredNewProfit.toFixed(2)}).`);
+            return true;
+        }
+
+        logger.info(`[RELAY CHECK] ❌ RECHAZADO. New Profit ($${newCandidateAbsProfit.toFixed(2)}) insufficient. Necesario: $${requiredNewProfit.toFixed(2)}`);
+        return false;
+    }
+
+    public async triggerBufferReplenishment(amountNeeded: number, riskManager: RiskManager) {
+        const settings = await Settings.findOne();
+        const isPaper = settings?.isPaperTrading ?? true;
+
+        // --- NEW: Calculate Buffer Shortfall ---
+        // Instead of just selling enough for the trade, we sell enough to get back to safety.
+        const bufferPerExchange = riskManager.getMaxTradeBudget(); // Target cash level in each wallet
+
+        const polyShortfall = Math.max(0, bufferPerExchange - this.polyCash);
+        const kalshiShortfall = Math.max(0, bufferPerExchange - this.kalshiCash);
+
+        // Target: restore the buffer AND cover the trade cost that triggered this.
+        const targetReplenishment = amountNeeded + polyShortfall + kalshiShortfall;
+
+        logger.info(`[RELAY] 🛡️ Buffer Maintenance: Trade needs $${amountNeeded.toFixed(2)}, shortfall is $${(polyShortfall + kalshiShortfall).toFixed(2)}. Target replenishment: $${targetReplenishment.toFixed(2)}`);
+
+        const openPositions = this.getOpenPositions();
+        openPositions.sort((a, b) => (a.expectedAnnualizedReturn || 0) - (b.expectedAnnualizedReturn || 0));
+
+        let cashRecovered = 0;
+
+        for (const worstPosition of openPositions) {
+            if (cashRecovered >= targetReplenishment) break;
+
+            const availableSize = worstPosition.size - (worstPosition.reservedSize || 0);
+            if (availableSize <= 0) continue;
+
+            const manager = this.registeredManagers.find(m => m.pairId === worstPosition.pairId);
+            if (!manager) continue;
+
+            logger.warn(`[RELAY] 🔄 Rellenando colchón. Liquidando peor posición: ${worstPosition.pairId} (EAR: ${(worstPosition.expectedAnnualizedReturn || 0).toFixed(3)})`);
+
+            const sizeToSell = availableSize;
+
+            if (isPaper) {
+                const exitSim = manager.simulateExit(sizeToSell);
+
+                // Fallback to a minor 5% spread loss if the orderbook is completely empty
+                const assumedPolyExitPrice = exitSim.size > 0 ? (exitSim.polyRevenue / exitSim.size) : (worstPosition.polyCost / worstPosition.size) * 0.95;
+                const assumedKalshiExitPrice = exitSim.size > 0 ? (exitSim.kalshiRevenue / exitSim.size) : (worstPosition.kalshiCost / worstPosition.size) * 0.95;
+                const assumedFees = exitSim.size > 0 ? exitSim.totalKalshiFees : Math.ceil(0.07 * sizeToSell * assumedKalshiExitPrice * (1 - assumedKalshiExitPrice) * 100) / 100;
+
+                this.closePosition(
+                    worstPosition.pairId, sizeToSell,
+                    assumedPolyExitPrice, assumedKalshiExitPrice, assumedFees
+                );
+
+                const recovered = (sizeToSell * assumedPolyExitPrice) + (sizeToSell * assumedKalshiExitPrice) - assumedFees;
+                cashRecovered += recovered;
+                logger.info(`[RELAY] ✅ Paper Exit completado. Recuperados ~$${recovered.toFixed(2)}`);
+            } else {
+                // == EJECUCIÓN REAL (LIVE ENGINE) ==
+                worstPosition.reservedSize = (worstPosition.reservedSize || 0) + sizeToSell;
+
+                const polyAssetId = worstPosition.type.includes('PolyYes') ? manager.polyYesTokenId : manager.polyNoTokenId;
+                const kalshiSide = worstPosition.type.includes('KalshiYes') ? 'yes' : 'no';
+
+                // Asumimos que recuperaremos aproximadamente el coste para avanzar el bucle
+                cashRecovered += worstPosition.totalCost * (sizeToSell / worstPosition.size);
+
+                return {
+                    pairId: worstPosition.pairId,
+                    marketQuestion: worstPosition.marketQuestion,
+                    tradeType: worstPosition.type,
+                    targetSize: sizeToSell,
+                    polyAssetId: polyAssetId,
+                    kalshiTicker: manager.pairData.kalshiMarket.internal_id,
+                    kalshiSide: kalshiSide as 'yes' | 'no',
+                    polyMaxVwap: 0.01,
+                    kalshiMaxVwap: 0.01,
+                    isEntry: false,
+                    expectedEAR: 999,
+                    availableLiquidity: sizeToSell
+                }
+            }
+        }
     }
 }

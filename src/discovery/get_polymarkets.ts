@@ -61,7 +61,7 @@ async function getAllActivePolymarketMarkets() {
                     // --- THE DIFFERENCE ---
                     // Parse liquidity safely and check if it's over 10,000
                     const volume = parseFloat(market.volume || "0");
-                    if (volume > 100000) {
+                    if (volume > 10000) {
                         allMarkets.push(market);
                     }
                 } else {

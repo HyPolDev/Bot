@@ -8,6 +8,7 @@
   "main": "index.ts",
   "scripts": {
     "start": "npx tsx src/index.ts",
+    "reset-sim": "npx tsx scripts/reset_sim.ts",
     "test-execution": "npx tsx src/execution/test_execution.ts",
     "test-risk": "npx tsx src/test/test_risk_math.ts",
     "test-balances": "npx tsx src/test/test_balances.ts",
@@ -31,6 +32,7 @@
     "dotenv": "^17.3.1",
     "ethers": "^5.8.0",
     "openai": "^6.25.0",
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "mongoose": "^8.2.1"
   }
 }

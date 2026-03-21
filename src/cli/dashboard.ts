@@ -1,13 +1,15 @@
 import readline from 'readline';
 import { PairManager } from '../monitor/pair_manager.js';
 import { PortfolioManager, Position } from '../portfolio/portfolio_manager.js';
+import { Settings } from '../db/models/Settings.js';
 
 enum ViewState {
     HOME,
     ORDERBOOK_LIST,
     ORDERBOOK_LIVE,
     POSITIONS,
-    POSITION_LIVE
+    POSITION_LIVE,
+    KILL_CONFIRM
 }
 
 export class CLI {
@@ -17,6 +19,7 @@ export class CLI {
     private viewState: ViewState = ViewState.HOME;
     private activeManager: PairManager | null = null;
     private activePosition: Position | null = null;
+    private killConfirmChoice: boolean = false;
 
     private renderedLines: number = 0;
     private cursorIndex: number = 0;
@@ -25,18 +28,31 @@ export class CLI {
     private readonly POSITIONS_PAGE_SIZE: number = 5;
 
     private refreshInterval: NodeJS.Timeout | null = null;
+    private isPaperTrading: boolean = true; // Cached from DB
 
     constructor(managers: PairManager[], portfolio: PortfolioManager) {
         this.managers = managers;
         this.portfolio = portfolio;
 
-        // Immediately resolve any ledger-recovered positions against the natively launched managers
-        this.portfolio.relinkRecoveredPositions(this.managers);
-
+        this.initSettings();
         this.setupKeyboardListeners();
 
         // Start the UI render loop (updates once per second for static screens)
         this.startRenderLoop();
+    }
+
+    private async initSettings() {
+        try {
+            const settings = await Settings.findOne();
+            if (settings) {
+                this.isPaperTrading = settings.isPaperTrading;
+                if (!this.isPaperTrading) {
+                    this.portfolio.relinkRecoveredPositions(this.managers);
+                }
+            }
+        } catch (error) {
+            // Fallback gracefully
+        }
     }
 
     public showMenu() {
@@ -50,6 +66,7 @@ export class CLI {
         this.refreshInterval = setInterval(() => {
             if (this.viewState === ViewState.HOME) this.renderHome();
             else if (this.viewState === ViewState.POSITIONS) this.renderPositions();
+            else if (this.viewState === ViewState.KILL_CONFIRM) this.renderKillConfirm();
             // Orderbook live handles its own instant updates via callbacks
         }, 1000);
     }
@@ -115,6 +132,7 @@ export class CLI {
                     } else if (key.name === 'return' || key.name === 'enter') {
                         const positions = this.portfolio.getOpenPositions();
                         if (positions.length > 0) {
+                            this.positionCursorIndex = Math.max(0, Math.min(this.positionCursorIndex, positions.length - 1));
                             this.activePosition = positions[this.positionCursorIndex];
                             this.activeManager = this.managers.find(m => m.pairId === this.activePosition!.pairId) || null;
                             this.viewState = ViewState.POSITION_LIVE;
@@ -133,6 +151,39 @@ export class CLI {
                         this.activePosition = null;
                         this.viewState = ViewState.POSITIONS;
                         this.renderPositions();
+                    } else if (key.name === 'k') {
+                        if (this.activeManager) this.activeManager.detachViewer();
+                        this.killConfirmChoice = false;
+                        this.viewState = ViewState.KILL_CONFIRM;
+                        this.renderKillConfirm();
+                    }
+                    break;
+
+                case ViewState.KILL_CONFIRM:
+                    if (key.name === 'left' || key.name === 'right' || key.name === 'up' || key.name === 'down') {
+                        this.killConfirmChoice = !this.killConfirmChoice;
+                        this.renderKillConfirm();
+                    } else if (key.name === 'return' || key.name === 'enter') {
+                        if (this.killConfirmChoice) {
+                            if (this.activeManager) {
+                                this.activeManager.forceKillPosition();
+                                this.managers = this.managers.filter(m => m.pairId !== this.activeManager!.pairId);
+                            }
+                            this.activeManager = null;
+                            this.activePosition = null;
+                            this.viewState = ViewState.POSITIONS;
+                            this.renderPositions();
+                        } else {
+                            if (this.activeManager) {
+                                this.viewState = ViewState.POSITION_LIVE;
+                                this.viewPositionLive();
+                            }
+                        }
+                    } else if (key.name === 'b' || key.name === 'escape') {
+                        if (this.activeManager) {
+                            this.viewState = ViewState.POSITION_LIVE;
+                            this.viewPositionLive();
+                        }
                     }
                     break;
             }
@@ -159,8 +210,7 @@ export class CLI {
         const pnl = this.portfolio.getRealizedPnL();
         const positions = this.portfolio.getOpenPositions().length;
 
-        const isPaper = process.env.PAPER_TRADE !== 'false';
-        const modeLabel = isPaper
+        const modeLabel = this.isPaperTrading
             ? `\x1b[32m[🛡️  PAPER SIMULATION ACTIVE]\x1b[0m`
             : `\x1b[31m[⚠️  LIVE DEPLOYMENT AUTHORIZED ⚠️ ]\x1b[0m`;
 
@@ -195,6 +245,10 @@ export class CLI {
         this.clearScreenHelper();
 
         const positions = this.portfolio.getOpenPositions();
+
+        if (this.positionCursorIndex >= positions.length) {
+            this.positionCursorIndex = Math.max(0, positions.length - 1);
+        }
 
         let output = `\n=============================================================\n`;
         output += `                      ACTIVE POSITIONS (${positions.length})\n`;
@@ -333,6 +387,36 @@ export class CLI {
         this.renderPositionLive();
     }
 
+    private renderKillConfirm() {
+        if (this.viewState !== ViewState.KILL_CONFIRM || !this.activePosition || !this.activeManager) return;
+        this.clearScreenHelper();
+
+        const pos = this.activePosition;
+        const qA = this.activeManager.pairData.polyMarket.market_question;
+
+        let output = `\n=============================================================\n`;
+        output += `\x1b[41m\x1b[37m⚠️  DANGER: KILL SWITCH ⚠️ \x1b[0m\n`;
+        output += `=============================================================\n`;
+        output += `  Market: ${qA.substring(0, 50)}...\n`;
+        output += `  Action: Market-sell ${pos.size} contracts\n`;
+        output += `  Result: Closes position at market price, BANS pair,\n`;
+        output += `          and DELETES DB record permanently.\n`;
+        output += `=============================================================\n\n`;
+        output += `  Are you sure you want to kill this position?\n\n`;
+
+        if (this.killConfirmChoice) {
+            output += `        [ NO ]         > \x1b[41m\x1b[37m[ YES ]\x1b[0m <\n\n`;
+        } else {
+            output += `      > \x1b[47m\x1b[30m[ NO ]\x1b[0m <         [ YES ]\n\n`;
+        }
+
+        output += `=============================================================\n`;
+        output += ` Use ARROWS to select | ENTER to confirm | 'b' to cancel\n`;
+
+        this.renderedLines = output.split('\n').length - 1;
+        process.stdout.write(output);
+    }
+
     private renderPositionLive() {
         if (!this.activePosition || !this.activeManager || this.viewState !== ViewState.POSITION_LIVE) return;
 
@@ -388,7 +472,7 @@ export class CLI {
         }
 
         output += `=============================================================\n`;
-        output += ` Press 'b' to return to list | Press 'q' to exit\n`;
+        output += ` Press 'k' to KILL switch | 'b' to back | 'q' to exit\n`;
 
         this.renderedLines = output.split('\n').length - 1;
         process.stdout.write(output);

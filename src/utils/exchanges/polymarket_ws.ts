@@ -4,6 +4,7 @@ export class PolymarketWS {
     private outcomeIdYes: string;
     private outcomeIdNo: string;
     private isRunning: boolean = false;
+    private ws: WebSocket | null = null;
 
     // The callback function passed from PairManager to receive updates
     private onUpdate: (source: string, book: any) => void;
@@ -24,10 +25,19 @@ export class PolymarketWS {
         this.connect();
     }
 
+    public stop() {
+        this.isRunning = false;
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+    }
+
     private connect() {
         if (!this.isRunning) return;
 
         const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market');
+        this.ws = ws;
 
         ws.on('open', () => {
             const subscribeMsg = {
@@ -111,7 +121,7 @@ export class PolymarketWS {
 
         ws.on('close', () => {
             clearInterval(pingInterval);
-            setTimeout(() => this.connect(), 500);
+            if (this.isRunning) setTimeout(() => this.connect(), 500);
         });
 
         ws.on('error', () => { });

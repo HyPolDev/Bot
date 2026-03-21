@@ -2,6 +2,8 @@ import fs from 'fs';
 import * as readline from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
 import path from 'path';
+import { DatabaseConnection } from '../db/connection.js';
+import { MarketPair } from '../db/models/MarketPair.js';
 
 // 1. Define Structures matching your Vector Search output
 interface UnifiedMarket {
@@ -27,7 +29,6 @@ async function run() {
     const DATA_DIR = path.posix.join(process.cwd(), 'data');
 
     const inputFile = path.posix.join(DATA_DIR, 'candidate_market_groups.json');
-    const outputFile = path.posix.join(DATA_DIR, 'market_pairs.json');
 
     if (!fs.existsSync(inputFile)) {
         console.error(`Error: ${inputFile} not found. Run your vector matcher script first.`);
@@ -90,9 +91,29 @@ async function run() {
     // 3. Save the final verified list
     // We only write to the file if we actually have data, or if the user explicitly wants to overwrite.
     if (validatedPairs.length > 0) {
-        fs.writeFileSync(outputFile, JSON.stringify(validatedPairs, null, 2));
-        console.log(`\nSuccess! Validated ${validatedPairs.length} true arbitrage pairs.`);
-        console.log(`Data saved to ${outputFile}\n`);
+        await DatabaseConnection.getInstance().connect();
+        for (const pair of validatedPairs) {
+            const pairId = `${pair.kalshiMarket.internal_id}+${pair.polyMarket.internal_id}`;
+            await MarketPair.findOneAndUpdate(
+                { pairId },
+                {
+                    $set: {
+                        kalshiMarket: pair.kalshiMarket,
+                        polyMarket: pair.polyMarket,
+                        score: pair.score,
+                        outcomeAlignment: 1,
+                        metrics: {
+                            last_updated: new Date(),
+                            s_history: { PolyYes_kalshiNo: [], PolyNoKalshiYes: [] },
+                            expected_annualized_return: null
+                        }
+                    }
+                },
+                { upsert: true }
+            );
+        }
+        await DatabaseConnection.getInstance().disconnect();
+        console.log(`\nSuccess! Validated and saved ${validatedPairs.length} true arbitrage pairs to MongoDB.\n`);
     } else {
         console.log(`\nFinished. No valid pairs were selected. Nothing was saved.\n`);
     }
