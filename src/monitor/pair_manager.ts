@@ -49,12 +49,19 @@ export class PairManager {
         'poly_no_asks': new Map(),
         'kalshi_yes_asks': new Map(),
         'kalshi_no_asks': new Map(),
+        'poly_yes_bids': new Map(),
+        'poly_no_bids': new Map(),
+        'kalshi_yes_bids': new Map(),
+        'kalshi_no_bids': new Map(),
     };
 
     private onUIUpdate: (() => void) | null = null;
 
     private lastArbitrageTime: number = 0;
     private readonly ARBITRAGE_COOLDOWN_MS: number = 10000;
+
+    private isEvaluatingEntry: boolean = false;
+    private isEvaluatingTakeProfit: boolean = false;
 
     private async getSettings() {
         try {
@@ -191,7 +198,7 @@ export class PairManager {
             const k = kBook[kIdx];
 
             // Raw spread pre-filter: a combined ask >= 1.00 can never be profitable.
-            if (p.price + k.price >= 1.00) break;
+            if (p.price + k.price >= 1) break;
 
             const overlap = Math.min(p.size, k.size);
             if (overlap <= 0) break;
@@ -211,6 +218,7 @@ export class PairManager {
             const candidateBlockFee = Math.ceil(0.07 * candidateShares * blendedKalshiPrice * (1 - blendedKalshiPrice) * 100) / 100;
             const candidateCostBasis = candidateRawSpread + (candidateBlockFee / candidateShares);
             const candidateNetProfit = 1.00 - candidateCostBasis;
+            if (candidateNetProfit <= 0.005) break;
             const candidateEAR = (candidateNetProfit / candidateCostBasis) * (365 / safeDays);
 
             // If this level degrades the EAR below threshold, stop accumulating.
@@ -257,155 +265,176 @@ export class PairManager {
     }
 
     private async evaluateAbsoluteTakeProfit() {
-        const pos = this.portfolio.getPosition(this.pairId);
-        if (!pos || !this.latestKalshiBook || !this.liveEngine.isSystemReady) return;
+        if (this.isEvaluatingTakeProfit) return;
+        this.isEvaluatingTakeProfit = true;
+        try {
+            const pos = this.portfolio.getPosition(this.pairId);
+            if (!pos || !this.latestKalshiBook || !this.liveEngine.isSystemReady) return;
 
-        // 1. Seleccionar los libros de Bids correctos según nuestra posición
-        let pBids = []; let kBids = [];
-        if (pos.type === 'PolyYes_KalshiNo') {
-            pBids = this.latestPolyBook.yes?.bids || [];
-            kBids = this.latestKalshiBook.no?.bids || [];
-        } else if (pos.type === 'PolyNo_KalshiYes') {
-            pBids = this.latestPolyBook.no?.bids || [];
-            kBids = this.latestKalshiBook.yes?.bids || [];
-        } else if (pos.type === 'PolyYes_KalshiYes_Flipped') {
-            pBids = this.latestPolyBook.yes?.bids || [];
-            kBids = this.latestKalshiBook.yes?.bids || [];
-        } else if (pos.type === 'PolyNo_KalshiNo_Flipped') {
-            pBids = this.latestPolyBook.no?.bids || [];
-            kBids = this.latestKalshiBook.no?.bids || [];
-        }
+            // 1. Seleccionar los libros de Bids correctos según nuestra posición y aplicar ghost liquidity
+            let pBids = []; let kBids = [];
+            let pKey = ''; let kKey = '';
 
-        if (pBids.length === 0 || kBids.length === 0) return;
-
-        // 2. Barrido del Orderbook (Sweep)
-        let pIdx = 0; let kIdx = 0;
-        const pBook = pBids.map((l: any) => ({ ...l }));
-        const kBook = kBids.map((l: any) => ({ ...l }));
-
-        let totalShares = 0;
-        let polyRevenue = 0;
-        let kalshiRevenue = 0;
-        let polyWorstPrice = 1; // Para ventas, el peor precio es el más bajo
-        let kalshiWorstPrice = 1;
-
-        // Intentamos barrer hasta llenar el tamaño total de nuestra posición
-        while (pIdx < pBook.length && kIdx < kBook.length && totalShares < pos.size) {
-            const p = pBook[pIdx];
-            const k = kBook[kIdx];
-
-            // Pre-filtro bruto: si la suma de los bids puros ya es < 1.00, no vale la pena seguir bajando en el libro
-            if (p.price + k.price < 1.00) break;
-
-            const overlap = Math.min(p.size, k.size);
-            if (overlap <= 0) break;
-
-            // Aquí NO usamos el /2 de safety buffer porque nuestro objetivo es vaciar nuestro inventario exacto
-            const take = Math.min(overlap, pos.size - totalShares);
-            if (take <= 0) break;
-
-            totalShares += take;
-            polyRevenue += take * p.price;
-            kalshiRevenue += take * k.price;
-
-            polyWorstPrice = Math.min(polyWorstPrice, p.price);
-            kalshiWorstPrice = Math.min(kalshiWorstPrice, k.price);
-
-            p.size -= overlap;
-            k.size -= overlap;
-            if (p.size <= 0) pIdx++;
-            if (k.size <= 0) kIdx++;
-        }
-
-        if (totalShares === 0) return;
-
-        // 3. Calcular VWAP y Comisiones del Bloque
-        const blendedKalshiPrice = kalshiRevenue / totalShares;
-
-        // El 'ceil' se aplica una sola vez al bloque completo
-        const totalKalshiFees = Math.ceil(0.07 * totalShares * blendedKalshiPrice * (1 - blendedKalshiPrice) * 100) / 100;
-
-        const netRevenue = polyRevenue + kalshiRevenue - totalKalshiFees;
-        const netRevenuePerShare = netRevenue / totalShares;
-
-        // 4. CONDICIÓN DE COSECHA SEGURA
-        // Exigimos que podamos vender AL MENOS el 10% de nuestra posición si la oportunidad es real,
-        // o el 100% si es pequeña, para no gastar llamadas de API por 1 solo contrato.
-        const minViableExit = Math.max(1, Math.floor(pos.size * 0.1));
-
-        if (netRevenuePerShare >= 1.00 && totalShares >= minViableExit) {
-            logger.info(`[TAKE PROFIT ABSOLUTO] 🚨 ${this.pairId} ofrece ${netRevenuePerShare.toFixed(3)} neto por ${totalShares} contratos. Liquidando.`);
-
-            const settings = await this.getSettings();
-            this.lastArbitrageTime = Date.now();
-
-            if (settings.isPaperTrading) {
-                // Reutiliza tu lógica de simulación de salida aquí
-                this.portfolio.closePosition(this.pairId, totalShares, polyRevenue / totalShares, kalshiRevenue / totalShares, totalKalshiFees);
-            } else {
-                const polyAssetId = pos.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
-                const kalshiSide = pos.type.includes('KalshiYes') ? 'yes' : 'no';
-
-                this.liveEngine.queueOrder({
-                    pairId: this.pairId,
-                    marketQuestion: this.pairData.polyMarket.market_question,
-                    tradeType: pos.type,
-                    targetSize: totalShares,
-                    polyAssetId: polyAssetId,
-                    kalshiTicker: this.pairData.kalshiMarket.internal_id,
-                    kalshiSide: kalshiSide as 'yes' | 'no',
-                    polyMaxVwap: Math.floor(polyWorstPrice * 100) / 100, // Suelo para Poly
-                    kalshiMaxVwap: Math.floor(kalshiWorstPrice * 100) / 100, // Suelo para Kalshi (peor precio aceptable)
-                    isEntry: false,
-                    expectedEAR: 999, // Prioridad máxima en la cola
-                    availableLiquidity: totalShares,
-                    expiringDate: this.pairData.polyMarket.expiration
-                });
+            if (pos.type === 'PolyYes_KalshiNo') {
+                pKey = 'poly_yes_bids'; kKey = 'kalshi_no_bids';
+            } else if (pos.type === 'PolyNo_KalshiYes') {
+                pKey = 'poly_no_bids'; kKey = 'kalshi_yes_bids';
+            } else if (pos.type === 'PolyYes_KalshiYes_Flipped') {
+                pKey = 'poly_yes_bids'; kKey = 'kalshi_yes_bids';
+            } else if (pos.type === 'PolyNo_KalshiNo_Flipped') {
+                pKey = 'poly_no_bids'; kKey = 'kalshi_no_bids';
             }
+
+            if (pKey) {
+                pBids = this.applyGhostLiquidity(pos.type.includes('PolyYes') ? this.latestPolyBook.yes?.bids : this.latestPolyBook.no?.bids, this.ghostLiquidity[pKey]);
+                kBids = this.applyGhostLiquidity(pos.type.includes('KalshiYes') ? this.latestKalshiBook.yes?.bids : this.latestKalshiBook.no?.bids, this.ghostLiquidity[kKey]);
+            }
+
+            if (pBids.length === 0 || kBids.length === 0) return;
+
+            // 2. Barrido del Orderbook (Sweep)
+            let pIdx = 0; let kIdx = 0;
+            const pBook = pBids.map((l: any) => ({ ...l }));
+            const kBook = kBids.map((l: any) => ({ ...l }));
+
+            let totalShares = 0;
+            let polyRevenue = 0;
+            let kalshiRevenue = 0;
+            let polyWorstPrice = 1;
+            let kalshiWorstPrice = 1;
+
+            const availableSize = pos.size - (pos.reservedSize || 0);
+            if (availableSize <= 0) return;
+
+            const pConsumed = new Map<number, number>();
+            const kConsumed = new Map<number, number>();
+
+            while (pIdx < pBook.length && kIdx < kBook.length && totalShares < availableSize) {
+                const p = pBook[pIdx];
+                const k = kBook[kIdx];
+
+                if (p.price + k.price < 1.00) break;
+
+                const overlap = Math.min(p.size, k.size);
+                if (overlap <= 0) break;
+
+                const take = Math.min(overlap, pos.size - totalShares);
+                if (take <= 0) break;
+
+                totalShares += take;
+                polyRevenue += take * p.price;
+                kalshiRevenue += take * k.price;
+
+                pConsumed.set(p.price, (pConsumed.get(p.price) || 0) + take);
+                kConsumed.set(k.price, (kConsumed.get(k.price) || 0) + take);
+
+                polyWorstPrice = Math.min(polyWorstPrice, p.price);
+                kalshiWorstPrice = Math.min(kalshiWorstPrice, k.price);
+
+                p.size -= overlap;
+                k.size -= overlap;
+                if (p.size <= 0) pIdx++;
+                if (k.size <= 0) kIdx++;
+            }
+
+            if (totalShares === 0) return;
+
+            // 3. Calcular VWAP y Comisiones del Bloque
+            const blendedKalshiPrice = kalshiRevenue / totalShares;
+            const totalKalshiFees = Math.ceil(0.07 * totalShares * blendedKalshiPrice * (1 - blendedKalshiPrice) * 100) / 100;
+
+            const netRevenue = polyRevenue + kalshiRevenue - totalKalshiFees;
+            const netRevenuePerShare = netRevenue / totalShares;
+
+            const minViableExit = Math.max(1, Math.floor(pos.size * 0.1));
+
+            if (netRevenuePerShare >= 1.00 && totalShares >= minViableExit) {
+                logger.info(`[TAKE PROFIT ABSOLUTO] 🚨 ${this.pairId} ofrece ${netRevenuePerShare.toFixed(3)} neto por ${totalShares} contratos. Liquidando.`);
+
+                const settings = await this.getSettings();
+                this.lastArbitrageTime = Date.now();
+
+                // Commit ghost tokens before exiting to prevent double-spending in the same frame
+                const pgMap = this.ghostLiquidity[pKey];
+                for (const [pr, sz] of pConsumed) pgMap.set(pr, (pgMap.get(pr) || 0) + sz);
+                const kgMap = this.ghostLiquidity[kKey];
+                for (const [pr, sz] of kConsumed) kgMap.set(pr, (kgMap.get(pr) || 0) + sz);
+
+                if (settings.isPaperTrading) {
+                    this.portfolio.closePosition(this.pairId, totalShares, polyRevenue / totalShares, kalshiRevenue / totalShares, totalKalshiFees);
+                } else {
+                    pos.reservedSize = (pos.reservedSize || 0) + totalShares;
+
+                    const polyAssetId = pos.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
+                    const kalshiSide = pos.type.includes('KalshiYes') ? 'yes' : 'no';
+
+                    this.liveEngine.queueOrder({
+                        pairId: this.pairId,
+                        marketQuestion: this.pairData.polyMarket.market_question,
+                        tradeType: pos.type,
+                        targetSize: totalShares,
+                        polyAssetId: polyAssetId,
+                        kalshiTicker: this.pairData.kalshiMarket.internal_id,
+                        kalshiSide: kalshiSide as 'yes' | 'no',
+                        polyMaxVwap: Math.floor(polyWorstPrice * 100) / 100,
+                        kalshiMaxVwap: Math.floor(kalshiWorstPrice * 100) / 100,
+                        isEntry: false,
+                        expectedEAR: 999,
+                        availableLiquidity: totalShares,
+                        expiringDate: this.pairData.polyMarket.expiration
+                    });
+                }
+            }
+        } finally {
+            this.isEvaluatingTakeProfit = false;
         }
     }
 
     private async evaluateEntry() {
-        if (!this.liveEngine.isSystemReady) return;
-        if (!this.latestKalshiBook) return;
-        // Global Safe Execution Guard
-        if ((this.portfolio as any).isPairBanned && (this.portfolio as any).isPairBanned(this.pairId)) return;
+        if (this.isEvaluatingEntry || !this.liveEngine.isSystemReady || !this.latestKalshiBook) return;
+        this.isEvaluatingEntry = true;
+        try {
+            // Global Safe Execution Guard
+            if ((this.portfolio as any).isPairBanned && (this.portfolio as any).isPairBanned(this.pairId)) return;
 
-        const settings = await this.getSettings();
-        const now = Date.now();
-        if (now - this.lastArbitrageTime < settings.arbitrageCooldown) return;
+            const settings = await this.getSettings();
+            const now = Date.now();
+            if (now - this.lastArbitrageTime < settings.arbitrageCooldown) return;
 
-        // Expiration: use the earlier of the two market dates as the conservative T_exp.
-        const polyExpMs = this.pairData.polyMarket.expiration ? new Date(this.pairData.polyMarket.expiration).getTime() : Infinity;
-        const kalshiExpMs = this.pairData.kalshiMarket.expiration ? new Date(this.pairData.kalshiMarket.expiration).getTime() : Infinity;
-        const expirationMs = Math.min(polyExpMs, kalshiExpMs);
-        const daysToExpiration = (expirationMs - Date.now()) / 86_400_000;
-        const expiringDate = Number.isFinite(expirationMs) ? new Date(expirationMs) : undefined;
-        const minEarThreshold = (settings as any).minEarThreshold ?? 0.15;
-        const alignment = this.pairData.outcomeAlignment;
+            // Expiration: use the earlier of the two market dates as the conservative T_exp.
+            const polyExpMs = this.pairData.polyMarket.expiration ? new Date(this.pairData.polyMarket.expiration).getTime() : Infinity;
+            const kalshiExpMs = this.pairData.kalshiMarket.expiration ? new Date(this.pairData.kalshiMarket.expiration).getTime() : Infinity;
+            const expirationMs = Math.min(polyExpMs, kalshiExpMs);
+            const daysToExpiration = (expirationMs - Date.now()) / 86_400_000;
+            const expiringDate = Number.isFinite(expirationMs) ? new Date(expirationMs) : undefined;
+            const minEarThreshold = (settings as any).minEarThreshold ?? 0.15;
+            const alignment = this.pairData.outcomeAlignment;
 
-        if (alignment === 1) {
-            this.checkAndTriggerEntry('PolyYes_KalshiNo',
-                this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
-                this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks']),
-                daysToExpiration, minEarThreshold, expiringDate
-            );
-            this.checkAndTriggerEntry('PolyNo_KalshiYes',
-                this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
-                this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks']),
-                daysToExpiration, minEarThreshold, expiringDate
-            );
-        } else if (alignment === -1) {
-            this.checkAndTriggerEntry('PolyYes_KalshiYes_Flipped',
-                this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
-                this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks']),
-                daysToExpiration, minEarThreshold, expiringDate
-            );
-            this.checkAndTriggerEntry('PolyNo_KalshiNo_Flipped',
-                this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
-                this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks']),
-                daysToExpiration, minEarThreshold, expiringDate
-            );
+            if (alignment === 1) {
+                this.checkAndTriggerEntry('PolyYes_KalshiNo',
+                    this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
+                    this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks']),
+                    daysToExpiration, minEarThreshold, expiringDate
+                );
+                this.checkAndTriggerEntry('PolyNo_KalshiYes',
+                    this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
+                    this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks']),
+                    daysToExpiration, minEarThreshold, expiringDate
+                );
+            } else if (alignment === -1) {
+                this.checkAndTriggerEntry('PolyYes_KalshiYes_Flipped',
+                    this.applyGhostLiquidity(this.latestPolyBook.yes?.asks, this.ghostLiquidity['poly_yes_asks']),
+                    this.applyGhostLiquidity(this.latestKalshiBook.yes?.asks, this.ghostLiquidity['kalshi_yes_asks']),
+                    daysToExpiration, minEarThreshold, expiringDate
+                );
+                this.checkAndTriggerEntry('PolyNo_KalshiNo_Flipped',
+                    this.applyGhostLiquidity(this.latestPolyBook.no?.asks, this.ghostLiquidity['poly_no_asks']),
+                    this.applyGhostLiquidity(this.latestKalshiBook.no?.asks, this.ghostLiquidity['kalshi_no_asks']),
+                    daysToExpiration, minEarThreshold, expiringDate
+                );
+            }
+        } finally {
+            this.isEvaluatingEntry = false;
         }
     }
 
@@ -427,39 +456,38 @@ export class PairManager {
             if (approvedSize > 0) {
                 const settings = await this.getSettings();
                 this.lastArbitrageTime = Date.now();
+
+                // Pre-execution budget guard: check for buffer breach and evaluate relay
+                const polyRequiredCost = sweep.polyVwap * approvedSize;
+                const kalshiRequiredCost = sweep.kalshiVwap * approvedSize;
+
+                const opPolyCash = this.portfolio.getOperationalPolyCash(this.risk);
+                const opKalshiCash = this.portfolio.getOperationalKalshiCash(this.risk);
+
+                let useBuffer = false;
+
+                // Stop if we don't even have the total cash to cover it
+                if (this.portfolio.getPolyCash() < polyRequiredCost || this.portfolio.getKalshiCash() < kalshiRequiredCost) {
+                    return;
+                }
+
+                // If operational cash is insufficient, check the buffer and evaluate rotation
+                if (opPolyCash < polyRequiredCost || opKalshiCash < kalshiRequiredCost) {
+                    const isValidRelay = await this.portfolio.evaluateRelayRotation(sweep.marginEAR, polyRequiredCost + kalshiRequiredCost);
+                    if (!isValidRelay) {
+                        return; // New opportunity doesn't justify the "exit toll" of the worst position
+                    }
+                    useBuffer = true;
+                }
+
                 if (settings.isPaperTrading) {
                     this.executePaperEntry(type, approvedSize, sweep.polyVwap + sweep.kalshiVwap, sweep.marginEAR, daysToExpiration, settings.simulatedLatency, expiringDate);
+
+                    if (useBuffer) {
+                        // In simulation, we immediately trigger the replenishment (which does simulated closePosition)
+                        await this.portfolio.triggerBufferReplenishment(polyRequiredCost + kalshiRequiredCost, this.risk);
+                    }
                 } else {
-                    // Pre-execution budget guard: silently abort if wallets cannot cover the order.
-                    const polyRequiredCost = sweep.polyVwap * approvedSize;
-                    const kalshiRequiredCost = sweep.kalshiVwap * approvedSize;
-
-                    const opPolyCash = this.portfolio.getOperationalPolyCash(this.risk);
-                    const opKalshiCash = this.portfolio.getOperationalKalshiCash(this.risk);
-
-                    let useBuffer = false;
-
-                    if (this.portfolio.getPolyCash() < polyRequiredCost || this.portfolio.getKalshiCash() < kalshiRequiredCost) {
-                        return;
-                    }
-
-                    if (opPolyCash < polyRequiredCost || opKalshiCash < kalshiRequiredCost) {
-                        // 2. No tenemos operativo. ¿Tenemos suficiente en el Colchón Total?
-                        if (this.portfolio.getPolyCash() >= polyRequiredCost && this.portfolio.getKalshiCash() >= kalshiRequiredCost) {
-
-                            // 3. Evaluamos si vale la pena el relevo
-                            const isValidRelay = await this.portfolio.evaluateRelayRotation(sweep.marginEAR, polyRequiredCost + kalshiRequiredCost);
-
-                            if (!isValidRelay) {
-                                return; // La nueva oportunidad no compensa el peaje de vender la peor posición
-                            }
-
-                            useBuffer = true; // Permiso concedido para usar el colchón
-                        } else {
-                            return; // Ni siquiera el colchón puede pagarlo
-                        }
-                    }
-
                     // Live entry routing
                     const polyAssetId = type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
                     const kalshiSide = type.includes('KalshiYes') ? 'yes' : 'no';
@@ -472,17 +500,19 @@ export class PairManager {
                         polyAssetId: polyAssetId,
                         kalshiTicker: this.pairData.kalshiMarket.internal_id,
                         kalshiSide: kalshiSide as 'yes' | 'no',
-                        polyMaxVwap: Math.floor(sweep.polyWorstPrice * 100) / 100, // Round down to nearest cent
+                        polyMaxVwap: Math.floor(sweep.polyWorstPrice * 100) / 100,
                         kalshiMaxVwap: sweep.kalshiWorstPriceCents / 100,
                         isEntry: true,
-                        expectedEAR: sweep.marginEAR,  // Queue priority: higher EAR trades execute first
+                        expectedEAR: sweep.marginEAR,
                         availableLiquidity: sweep.size,
                         expiringDate: expiringDate
                     });
 
                     if (useBuffer) {
-                        let response = await this.portfolio.triggerBufferReplenishment(polyRequiredCost + kalshiRequiredCost); //add IMPORTANTexecution engine and change triggerbufferReplenishment
-                        if (response) this.liveEngine.queueOrder(response);
+                        const relayOrder = await this.portfolio.triggerBufferReplenishment(polyRequiredCost + kalshiRequiredCost, this.risk) as any;
+                        if (relayOrder && typeof relayOrder !== 'boolean') {
+                            this.liveEngine.queueOrder(relayOrder);
+                        }
                     }
                 }
             }
@@ -495,6 +525,8 @@ export class PairManager {
     ) {
         const timeDetected = new Date().toISOString();
         await new Promise(resolve => setTimeout(resolve, latencyMs));
+
+        if (!this.latestKalshiBook) return;
 
         let execPolyAsks: any[] = []; let execKalshiAsks: any[] = [];
         let polyKey = ''; let kalshiKey = '';
@@ -581,27 +613,28 @@ Detect VWAP: ${detectedSpread.toFixed(3)} | EAR: ${(detectedEAR * 100).toFixed(1
     }
 
     // [AÑADIR A PairManager.ts]
-    public simulateExit(targetSize: number): { size: number, netRevenue: number } {
+    public simulateExit(targetSize: number): { size: number, netRevenue: number, polyRevenue: number, kalshiRevenue: number, totalKalshiFees: number } {
         const pos = this.portfolio.getPosition(this.pairId);
-        if (!pos) return { size: 0, netRevenue: 0 };
+        if (!pos) return { size: 0, netRevenue: 0, polyRevenue: 0, kalshiRevenue: 0, totalKalshiFees: 0 };
+        if (!this.latestKalshiBook) return { size: 0, netRevenue: 0, polyRevenue: 0, kalshiRevenue: 0, totalKalshiFees: 0 };
 
         // 1. Seleccionar los libros de Bids según el tipo de posición
         let pBids = []; let kBids = [];
         if (pos.type === 'PolyYes_KalshiNo') {
             pBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity['poly_yes_bids']);
-            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook?.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
         } else if (pos.type === 'PolyNo_KalshiYes') {
             pBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity['poly_no_bids']);
-            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook?.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
         } else if (pos.type === 'PolyYes_KalshiYes_Flipped') {
             pBids = this.applyGhostLiquidity(this.latestPolyBook.yes?.bids, this.ghostLiquidity['poly_yes_bids']);
-            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook?.yes?.bids, this.ghostLiquidity['kalshi_yes_bids']);
         } else if (pos.type === 'PolyNo_KalshiNo_Flipped') {
             pBids = this.applyGhostLiquidity(this.latestPolyBook.no?.bids, this.ghostLiquidity['poly_no_bids']);
-            kBids = this.applyGhostLiquidity(this.latestKalshiBook!.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
+            kBids = this.applyGhostLiquidity(this.latestKalshiBook?.no?.bids, this.ghostLiquidity['kalshi_no_bids']);
         }
 
-        if (pBids.length === 0 || kBids.length === 0) return { size: 0, netRevenue: 0 };
+        if (pBids.length === 0 || kBids.length === 0) return { size: 0, netRevenue: 0, polyRevenue: 0, kalshiRevenue: 0, totalKalshiFees: 0 };
 
         // 2. Barrido del Orderbook (Bids)
         let pIdx = 0; let kIdx = 0;
@@ -632,7 +665,7 @@ Detect VWAP: ${detectedSpread.toFixed(3)} | EAR: ${(detectedEAR * 100).toFixed(1
             if (k.size <= 0) kIdx++;
         }
 
-        if (totalShares === 0) return { size: 0, netRevenue: 0 };
+        if (totalShares === 0) return { size: 0, netRevenue: 0, polyRevenue: 0, kalshiRevenue: 0, totalKalshiFees: 0 };
 
         // 3. Comisiones calculadas sobre el bloque total
         const blendedKalshiPrice = kalshiRevenue / totalShares;
@@ -640,7 +673,10 @@ Detect VWAP: ${detectedSpread.toFixed(3)} | EAR: ${(detectedEAR * 100).toFixed(1
 
         return {
             size: totalShares,
-            netRevenue: polyRevenue + kalshiRevenue - totalKalshiFees
+            netRevenue: polyRevenue + kalshiRevenue - totalKalshiFees,
+            polyRevenue: polyRevenue,
+            kalshiRevenue: kalshiRevenue,
+            totalKalshiFees: totalKalshiFees
         };
     }
 }

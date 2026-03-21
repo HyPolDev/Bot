@@ -57,15 +57,21 @@ export class RiskManager {
         const maxContractsKalshi = Math.floor(kalshiCash / kalshiPrice);
 
         // The true max size is bottlenecked by the poorest exchange
-        const maxSizeByCash = Math.min(maxContractsPoly, maxContractsKalshi);
+        let maxSizeByCash = Math.min(maxContractsPoly, maxContractsKalshi);
+
+        // SAFETY FLOOR: If cash is below $5 in either exchange, we abort the trade
+        // UNLESS we are already planning to trigger a relay (handled in PairManager).
+        // For now, simple floor to prevent fee-driven attrition.
+        if (polyCash < 5 || kalshiCash < 5) {
+            maxSizeByCash = 0;
+        }
 
         return Math.max(0, Math.min(finalSizeByRisk, maxSizeByCash));
     }
 
     public getMaxTradeBudget(): number {
         const totalEquity = this.portfolio.getTotalEquity();
-        const bottleneckCapital = Math.min(this.portfolio.getPolyCash(), this.portfolio.getKalshiCash());
-        const maxEquityPerTrade = this.calculateDynamicRisk(bottleneckCapital, 0.30, 0.02);
+        const maxEquityPerTrade = this.calculateDynamicRisk(totalEquity, 0.30, 0.02);
         return totalEquity * maxEquityPerTrade;
     }
 }
