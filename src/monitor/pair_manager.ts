@@ -128,6 +128,61 @@ export class PairManager {
         this.onUIUpdate = null;
     }
 
+    public stop() {
+        if (this.polyWsClient) this.polyWsClient.stop();
+        if (this.kalshiWsClient) this.kalshiWsClient.stop();
+        this.detachViewer();
+        logger.info(`[PairManager] 🛑 Fully stopped and detached streams for ${this.pairId}`);
+    }
+
+    public async forceKillPosition() {
+        const pos = this.portfolio.getPosition(this.pairId);
+        if (!pos) return;
+
+        logger.info(`[KILL SWITCH] 💥 Triggered for ${this.pairId}. Liquidating ${pos.size} contracts at market price...`);
+        const exitSim = this.simulateExit(pos.size);
+
+        const settings = await this.getSettings();
+        if (settings.isPaperTrading) {
+            const polyExitPrice = exitSim.size > 0 ? (exitSim.polyRevenue / exitSim.size) : (pos.polyCost / pos.size) * 0.95;
+            const kalshiExitPrice = exitSim.size > 0 ? (exitSim.kalshiRevenue / exitSim.size) : (pos.kalshiCost / pos.size) * 0.95;
+            const assumedFees = exitSim.size > 0 ? exitSim.totalKalshiFees : Math.ceil(0.07 * pos.size * kalshiExitPrice * (1 - kalshiExitPrice) * 100) / 100;
+            
+            this.portfolio.closePosition(this.pairId, pos.size, polyExitPrice, kalshiExitPrice, assumedFees);
+        } else {
+            const polyAssetId = pos.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
+            const kalshiSide = pos.type.includes('KalshiYes') ? 'yes' : 'no';
+
+            this.liveEngine.queueOrder({
+                pairId: this.pairId,
+                marketQuestion: this.pairData.polyMarket.market_question,
+                tradeType: pos.type,
+                targetSize: pos.size,
+                polyAssetId: polyAssetId,
+                kalshiTicker: this.pairData.kalshiMarket.internal_id,
+                kalshiSide: kalshiSide as 'yes' | 'no',
+                polyMaxVwap: 0.01, 
+                kalshiMaxVwap: 0.01, 
+                isEntry: false,
+                expectedEAR: 999, 
+                availableLiquidity: pos.size,
+                expiringDate: this.pairData.polyMarket.expiration
+            });
+            pos.reservedSize = (pos.reservedSize || 0) + pos.size;
+        }
+
+        this.stop();
+        this.portfolio.banPair(this.pairId, 2147483647); // Int32Max ~68 years
+
+        try {
+            const { MarketPair } = await import('../db/models/MarketPair.js');
+            await MarketPair.deleteOne({ pairId: this.pairId });
+            logger.info(`[KILL SWITCH] 🗑️ Erased ${this.pairId} from MongoDB`);
+        } catch (error) {
+            logger.error(`[KILL SWITCH] Failed to delete from DB`, error);
+        }
+    }
+
     private applyGhostLiquidity(realLevels: any[] | undefined, ghostMap: Map<number, number>): any[] {
         if (!realLevels) return [];
         const adjusted = [];

@@ -6,6 +6,7 @@ import { logger } from '../logger.js';
 export class KalshiWS {
     private outcomeId: string;
     private isRunning: boolean = false;
+    private ws: WebSocket | null = null;
     private onUpdate: (source: string, book: any) => void;
 
     private kalshiBooks = {
@@ -21,6 +22,14 @@ export class KalshiWS {
     public start() {
         this.isRunning = true;
         this.connect();
+    }
+
+    public stop() {
+        this.isRunning = false;
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
     }
 
     private normalizePrice(raw: any): number | null {
@@ -85,6 +94,7 @@ export class KalshiWS {
                 'KALSHI-ACCESS-TIMESTAMP': timestamp
             }
         });
+        this.ws = ws;
 
         ws.on('open', () => {
             const subscribeMsg = {
@@ -160,7 +170,7 @@ export class KalshiWS {
 
         ws.on('close', () => {
             clearInterval(pingInterval);
-            setTimeout(() => this.connect(), 5000);
+            if (this.isRunning) setTimeout(() => this.connect(), 5000);
         });
 
         ws.on('error', (err) => {
