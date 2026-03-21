@@ -147,7 +147,7 @@ export class PairManager {
             const polyExitPrice = exitSim.size > 0 ? (exitSim.polyRevenue / exitSim.size) : (pos.polyCost / pos.size) * 0.95;
             const kalshiExitPrice = exitSim.size > 0 ? (exitSim.kalshiRevenue / exitSim.size) : (pos.kalshiCost / pos.size) * 0.95;
             const assumedFees = exitSim.size > 0 ? exitSim.totalKalshiFees : Math.ceil(0.07 * pos.size * kalshiExitPrice * (1 - kalshiExitPrice) * 100) / 100;
-            
+
             this.portfolio.closePosition(this.pairId, pos.size, polyExitPrice, kalshiExitPrice, assumedFees);
         } else {
             const polyAssetId = pos.type.includes('PolyYes') ? this.polyYesTokenId : this.polyNoTokenId;
@@ -161,10 +161,10 @@ export class PairManager {
                 polyAssetId: polyAssetId,
                 kalshiTicker: this.pairData.kalshiMarket.internal_id,
                 kalshiSide: kalshiSide as 'yes' | 'no',
-                polyMaxVwap: 0.01, 
-                kalshiMaxVwap: 0.01, 
+                polyMaxVwap: 0.01,
+                kalshiMaxVwap: 0.01,
                 isEntry: false,
-                expectedEAR: 999, 
+                expectedEAR: 999,
                 availableLiquidity: pos.size,
                 expiringDate: this.pairData.polyMarket.expiration
             });
@@ -176,7 +176,11 @@ export class PairManager {
 
         try {
             const { MarketPair } = await import('../db/models/MarketPair.js');
-            await MarketPair.deleteOne({ pairId: this.pairId });
+            // 1. Transform the memory format (Poly_Kalshi) to the DB format (Kalshi+Poly)
+            const dbPairId = this.pairId.replace(/^([^_]+)_(.+)$/, '$2+$1');
+
+            // 2. Execute the exact-match database deletion
+            await MarketPair.deleteOne({ pairId: dbPairId });
             logger.info(`[KILL SWITCH] 🗑️ Erased ${this.pairId} from MongoDB`);
         } catch (error) {
             logger.error(`[KILL SWITCH] Failed to delete from DB`, error);
