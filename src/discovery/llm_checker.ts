@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 import axios from 'axios';
 import { DatabaseConnection } from '../db/connection.js';
 import { MarketPair } from '../db/models/MarketPair.js';
+import { Position } from '../db/models/Position.js';
+import { SimulatedPosition } from '../db/models/SimulatedPosition.js';
 
 dotenv.config({ override: true });
 
@@ -93,6 +95,19 @@ async function cleanupResolvedPairs() {
         const kalshiId = pair.kalshiMarket?.internal_id;
 
         if (polyId && kalshiId) {
+            const pairId = `${kalshiId}+${polyId}`;
+            
+            // Protect pairs that currently have an active/settling physical or simulated position
+            const hasLivePos = await Position.exists({ pairId: pairId, state: { $ne: 'closed' } });
+            const hasSimPos = await SimulatedPosition.exists({ pairId: pairId, state: { $ne: 'closed' } });
+
+            if (hasLivePos || hasSimPos) {
+                // Keep it in DB so the system spins up a PairManager to oversee final settlement
+                processedCount++;
+                cleanupBar.update(processedCount, { removed: removedCount });
+                continue;
+            }
+
             const [isPolyActive, isKalActive] = await Promise.all([
                 checkPolymarketActive(polyId),
                 checkKalshiActive(kalshiId)
