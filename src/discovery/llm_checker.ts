@@ -159,7 +159,7 @@ ALIGNMENT MAPPING:
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             const response = await ai.chat.completions.create({
-                model: "gpt-5-nano",
+                model: "gpt-5-mini",
                 messages: [
                     { role: "system", content: "You are a precise prediction market analyst. You only output valid JSON." },
                     { role: "user", content: prompt }
@@ -245,7 +245,7 @@ async function run() {
     await cleanupResolvedPairs();
 
     console.log(`Starting OpenAI verification for ${candidates.length} candidate pairs...`);
-    console.log(`Model: gpt-5-nano | Concurrency: ${MAX_CONCURRENT_REQUESTS} floating workers`);
+    console.log(`Model: gpt-5-mini | Concurrency: ${MAX_CONCURRENT_REQUESTS} floating workers`);
     console.log(`Mode: STRICT EXACT MATCH (1) or REJECT (0)\n`);
 
     const validatedPairs: ValidatedPair[] = [];

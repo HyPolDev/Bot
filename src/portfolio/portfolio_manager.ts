@@ -67,8 +67,8 @@ export class PortfolioManager {
                 logger.info(`[Portfolio] Paper Trading Enabled. Fetching simulated balances and positions...`);
 
                 // Hardcoded initial simulated balances (or could be moved to Settings later)
-                this.polyCash = 100;
-                this.kalshiCash = 100;
+                this.polyCash = 1000;
+                this.kalshiCash = 1000;
 
                 const dbPositions = await SimulatedPosition.find({ state: 'open' });
                 for (const pos of dbPositions) {
@@ -253,6 +253,14 @@ export class PortfolioManager {
     }
 
     public getRealizedPnL(): number { return this.totalRealizedPnL; }
+    public getUnrealizedPnL(): number {
+        let unrealized = 0;
+        for (const position of this.openPositions.values()) {
+            // Guaranteed payout per contract is $1, so expected profit is size - totalCost
+            unrealized += (position.size - position.totalCost);
+        }
+        return unrealized;
+    }
     public getOpenPositions(): Position[] { return Array.from(this.openPositions.values()); }
 
     public getInvestedCapital(): number {

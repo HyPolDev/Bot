@@ -208,6 +208,7 @@ export class CLI {
         const kalshiCash = this.portfolio.getKalshiCash();
         const invested = this.portfolio.getInvestedCapital();
         const pnl = this.portfolio.getRealizedPnL();
+        const unrealizedPnL = this.portfolio.getUnrealizedPnL();
         const positions = this.portfolio.getOpenPositions().length;
 
         const modeLabel = this.isPaperTrading
@@ -221,7 +222,8 @@ export class CLI {
 
         output += `  Total Equity      : $${totalEquity.toFixed(2)}\n`;
         output += `  Invested Capital  : $${invested.toFixed(2)}\n`;
-        output += `  Realized PnL      : ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}\n\n`;
+        output += `  Realized PnL      : ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}\n`;
+        output += `  Unrealized PnL    : ${unrealizedPnL >= 0 ? '+' : '-'}$${Math.abs(unrealizedPnL).toFixed(2)}\n\n`;
 
         output += `  --- EXCHANGE WALLETS ---\n`;
         output += `  Polymarket Cash   : $${polyCash.toFixed(2)}\n`;
