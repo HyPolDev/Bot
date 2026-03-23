@@ -1,7 +1,7 @@
-import { DatabaseConnection } from '../src/db/connection.js';
-import { SimulatedPosition } from '../src/db/models/SimulatedPosition.js';
-import { SimulatedTrade } from '../src/db/models/SimulatedTrade.js';
-import { Settings } from '../src/db/models/Settings.js';
+import { DatabaseConnection } from '../db/connection.js';
+import { SimulatedPosition } from '../db/models/SimulatedPosition.js';
+import { SimulatedTrade } from '../db/models/SimulatedTrade.js';
+import { Settings } from '../db/models/Settings.js';
 import mongoose from 'mongoose';
 
 async function resetSimulation() {

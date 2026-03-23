@@ -86,6 +86,7 @@ export class SettlementManager {
                     pos.state = 'closed';
                     await SimulatedPosition.updateOne({ pairId: pos.pairId, state: 'settling' }, { $set: { state: 'closed' } });
                     allPositions.delete(pos.pairId);
+                    await (this.portfolio as any).persistPaperBalances();
                     logger.info(`[Settlement] ✅ Fully Closed Simulated Position ${pos.pairId}. Funds $${payout.toFixed(2)} returned to active ledger.`);
                 }
                 continue;

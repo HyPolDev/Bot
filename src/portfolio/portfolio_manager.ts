@@ -67,9 +67,9 @@ export class PortfolioManager {
             if (settings && settings.isPaperTrading) {
                 logger.info(`[Portfolio] Paper Trading Enabled. Fetching simulated balances and positions...`);
 
-                // Hardcoded initial simulated balances (or could be moved to Settings later)
-                this.polyCash = 1000;
-                this.kalshiCash = 1000;
+                this.polyCash = settings.simulatedPolyCash ?? 1000;
+                this.kalshiCash = settings.simulatedKalshiCash ?? 1000;
+                this.totalRealizedPnL = settings.totalRealizedPnL ?? 0;
 
                 const dbPositions = await SimulatedPosition.find({ state: 'open' });
                 for (const pos of dbPositions) {
@@ -77,8 +77,9 @@ export class PortfolioManager {
                         (pos.averageKalshiPrice * pos.kalshiQuantity) +
                         pos.exitFees;
 
-                    this.polyCash -= (pos.averagePolyPrice * pos.polymarketQuantity);
-                    this.kalshiCash -= (pos.averageKalshiPrice * pos.kalshiQuantity + pos.exitFees);
+                    // Note: We NO LONGER subtract costs from this.polyCash/this.kalshiCash manually 
+                    // upon startup because the persistent wallet balances in the Settings DB 
+                    // already reflect the final cash state after all historical executions.
 
                     this.openPositions.set(pos.pairId, {
                         pairId: pos.pairId,
@@ -96,7 +97,7 @@ export class PortfolioManager {
                         state: pos.state as 'open' | 'settling' | 'closed'
                     });
                 }
-                logger.info(`[Portfolio] Restored ${dbPositions.length} simulated positions. Simulated Balances -> Poly: $${this.polyCash.toFixed(2)} | Kalshi: $${this.kalshiCash.toFixed(2)}`);
+                logger.info(`[Portfolio] Restored ${dbPositions.length} simulated positions. Simulated Balances -> Poly: $${this.polyCash.toFixed(2)} | Kalshi: $${this.kalshiCash.toFixed(2)} | Realized PnL: $${this.totalRealizedPnL.toFixed(2)}`);
             }
         } catch (error) {
             logger.error(`[Portfolio] Error initializing paper trading state from DB:`, error);
@@ -346,6 +347,7 @@ export class PortfolioManager {
             this.kalshiCash -= (kalshiCost + kalshiFees); // FIX: Deduct the fee from the wallet!
 
             this.persistPositionOpen(pos, totalCost, kalshiFees);
+            this.persistPaperBalances().catch(e => logger.error(`[Portfolio] Failed to persist paper balances: ${e.message}`));
             return true;
         }
 
@@ -366,7 +368,22 @@ export class PortfolioManager {
         this.kalshiCash -= (kalshiCost + kalshiFees);
 
         this.persistPositionOpen(newPosition, totalCost, kalshiFees);
+        this.persistPaperBalances().catch(e => logger.error(`[Portfolio] Failed to persist paper balances: ${e.message}`));
         return true;
+    }
+
+    public async persistPaperBalances() {
+        try {
+            const settings = await Settings.findOne();
+            if (!settings || !settings.isPaperTrading) return;
+
+            settings.simulatedPolyCash = this.polyCash;
+            settings.simulatedKalshiCash = this.kalshiCash;
+            settings.totalRealizedPnL = this.totalRealizedPnL;
+            await settings.save();
+        } catch (error) {
+            logger.error(`[Portfolio] Error saving paper balances to DB:`, error);
+        }
     }
 
     private async persistPositionOpen(pos: Position, totalCost: number, kalshiFees: number) {
@@ -455,6 +472,7 @@ export class PortfolioManager {
         });
 
         this.persistPositionClose(pairId, actualExitSize, actualExitSize === position.size ? 0 : position.size);
+        this.persistPaperBalances().catch(e => logger.error(`[Portfolio] Failed to persist paper balances: ${e.message}`));
         return true;
     }
 
