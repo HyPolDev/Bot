@@ -191,4 +191,41 @@ export class PolyClient {
             return [];
         }
     }
+
+    public async isMarketResolved(tokenId: string): Promise<boolean> {
+        try {
+            const res = await fetch(`https://gamma-api.polymarket.com/markets/${tokenId}`);
+            if (!res.ok) return false;
+            const data = await res.json();
+            // In polymarket gamma API, 'closed' or 'active'==false often indicates resolution/stop trading
+            return data.closed === true || data.active === false;
+        } catch (error: any) {
+            console.error(`[PolyClient] isMarketResolved error:`, error.message);
+            return false;
+        }
+    }
+
+    public async claimWinnings(conditionId: string): Promise<boolean> {
+        try {
+            console.log(`[Polymarket] 💰 Redeeming on-chain CTF for condition: ${conditionId}...`);
+            // as per user instructions:
+            const tx = await (this.client as any).redeem(conditionId);
+            
+            if (tx && typeof tx.wait === 'function') {
+                const receipt = await tx.wait();
+                console.log(`[Polymarket] ✅ Redeem confirmed in block: ${receipt.blockNumber}`);
+            } else if (typeof tx === 'string' && tx.startsWith('0x')) {
+                const rpcUrl = "https://1rpc.io/matic";
+                const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+                const receipt = await provider.waitForTransaction(tx, 1);
+                console.log(`[Polymarket] ✅ Redeem confirmed in block ${receipt.blockNumber}`);
+            } else {
+                console.log(`[Polymarket] ✅ Redeem response received:`, tx);
+            }
+            return true;
+        } catch (error: any) {
+            console.error(`[Polymarket] ⚠️ Failed to redeem condition ${conditionId}.`, error.message || error);
+            return false;
+        }
+    }
 }

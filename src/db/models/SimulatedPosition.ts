@@ -3,7 +3,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface ISimulatedPosition extends Document {
     pairId: string;
     marketQuestion: string;
-    state: 'open' | 'closed';
+    state: 'open' | 'settling' | 'closed';
     type: string;
     averagePolyPrice: number;
     polymarketQuantity: number;
@@ -12,6 +12,7 @@ export interface ISimulatedPosition extends Document {
     exitFees: number;
     expiringDate: Date;
     expectedAnnualizedReturn?: number;
+    simulatedWinner?: 'polymarket' | 'kalshi';
 }
 
 const SimulatedPositionSchema: Schema = new Schema({
@@ -19,8 +20,13 @@ const SimulatedPositionSchema: Schema = new Schema({
     marketQuestion: { type: String, required: true, default: "Simulated Market" },
     state: {
         type: String,
-        enum: ['open', 'closed'],
+        enum: ['open', 'settling', 'closed'],
         required: true
+    },
+    simulatedWinner: {
+        type: String,
+        enum: ['polymarket', 'kalshi'],
+        required: false
     },
     type: {
         type: String,

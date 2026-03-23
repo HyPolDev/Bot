@@ -239,7 +239,7 @@ export class PairManager {
         if (!polyLevels || !kalshiLevels || polyLevels.length === 0 || kalshiLevels.length === 0) return EMPTY;
 
         // Safety floor prevents division by zero when expiration is today.
-        const safeDays = Math.max(daysToExpiration, 0.1);
+        const safeDays = Math.max(daysToExpiration, 0.3333);
 
         let pIdx = 0; let kIdx = 0;
         const pBook = polyLevels.map(l => ({ ...l }));
@@ -328,7 +328,7 @@ export class PairManager {
         this.isEvaluatingTakeProfit = true;
         try {
             const pos = this.portfolio.getPosition(this.pairId);
-            if (!pos || !this.latestKalshiBook || !this.liveEngine.isSystemReady) return;
+            if (!pos || pos.state === 'settling' || !this.latestKalshiBook || !this.liveEngine.isSystemReady) return;
 
             // 1. Seleccionar los libros de Bids correctos según nuestra posición y aplicar ghost liquidity
             let pBids = []; let kBids = [];
@@ -671,7 +671,6 @@ Detect VWAP: ${detectedSpread.toFixed(3)} | EAR: ${(detectedEAR * 100).toFixed(1
         fs.appendFileSync('arbitrage_opportunities.txt', msg, 'utf8');
     }
 
-    // [AÑADIR A PairManager.ts]
     public simulateExit(targetSize: number): { size: number, netRevenue: number, polyRevenue: number, kalshiRevenue: number, totalKalshiFees: number } {
         const pos = this.portfolio.getPosition(this.pairId);
         if (!pos) return { size: 0, netRevenue: 0, polyRevenue: 0, kalshiRevenue: 0, totalKalshiFees: 0 };

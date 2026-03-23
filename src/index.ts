@@ -13,6 +13,7 @@ import readline from 'readline';
 import { DatabaseConnection } from './db/connection.js';
 import { MarketPair } from './db/models/MarketPair.js';
 import { Settings } from './db/models/Settings.js';
+import { SettlementManager } from './portfolio/settlement_manager.js';
 
 dotenv.config({ override: true });
 
@@ -88,6 +89,9 @@ async function bootSystem() {
     
     const liveEngine = new LiveEngine(portfolio);
     const riskManager = new RiskManager(portfolio);
+    
+    const settlementManager = new SettlementManager(portfolio, new PolyClient(), new KalshiClient());
+    settlementManager.startMonitors();
 
 
     const activeManagers: PairManager[] = [];
@@ -115,6 +119,8 @@ async function bootSystem() {
 
     // Wire up the physical position tracker to know which managers map to which tokens/tickers
     portfolio.setManagers(activeManagers);
+    settlementManager.setManagers(activeManagers);
+
     if (!settings.isPaperTrading) {
         console.log(`[System] Synchronizing physical exchange positions...`);
         await portfolio.syncBalances();

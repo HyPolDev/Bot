@@ -19,6 +19,7 @@ export interface Position {
     expiringDate: any;
     expectedAnnualizedReturn: number | undefined;
     reservedSize?: number; // In-flight sales to prevent double-selling
+    state?: 'open' | 'settling' | 'closed';
 }
 
 export class PortfolioManager {
@@ -91,7 +92,8 @@ export class PortfolioManager {
                         totalCost,
                         timestamp: Date.now(), // Could use createdAt from DB
                         expiringDate: pos.expiringDate,
-                        expectedAnnualizedReturn: pos.expectedAnnualizedReturn
+                        expectedAnnualizedReturn: pos.expectedAnnualizedReturn,
+                        state: pos.state as 'open' | 'settling' | 'closed'
                     });
                 }
                 logger.info(`[Portfolio] Restored ${dbPositions.length} simulated positions. Simulated Balances -> Poly: $${this.polyCash.toFixed(2)} | Kalshi: $${this.kalshiCash.toFixed(2)}`);
@@ -138,6 +140,14 @@ export class PortfolioManager {
             const toKeep = new Set<string>();
 
             for (const manager of this.registeredManagers) {
+                const pairId = manager.pairId;
+                const pos = this.openPositions.get(pairId);
+
+                if (pos && pos.state === 'settling') {
+                    toKeep.add(pairId);
+                    continue; // Quarantine: do not process or delete settling positions
+                }
+
                 const polyAssetIdYes = manager.polyYesTokenId;
                 const polyAssetIdNo = manager.polyNoTokenId;
                 const kalshiTicker = manager.pairData.kalshiMarket.internal_id;
@@ -148,8 +158,6 @@ export class PortfolioManager {
                 const kalshiPos = kalshiPositions.filter((p: any) => p.ticker === kalshiTicker && p.position !== 0);
 
                 if ((polyPosYes || polyPosNo) && kalshiPos.length > 0) {
-                    const pairId = manager.pairId;
-                    const pos = this.openPositions.get(pairId);
 
                     const polySize = polyPosYes ? polyPosYes.size : (polyPosNo ? polyPosNo.size : 0);
                     const kalshiSize = kalshiPos.reduce((sum: number, p: any) => sum + Math.abs(p.position), 0);
@@ -191,7 +199,8 @@ export class PortfolioManager {
                                 totalCost: polyCost + kalshiCost,
                                 timestamp: Date.now(),
                                 expiringDate: undefined,
-                                expectedAnnualizedReturn: undefined
+                                expectedAnnualizedReturn: undefined,
+                                state: 'open'
                             });
                             logger.info(`[Portfolio] 🔄 Auto-restored physical position ${pairId} with size ${realSize} | Poly @ ${polyEntryPrice.toFixed(3)} | Kalshi @ ${kalshiBlendedEntryPrice.toFixed(3)} (Inc. Est. Fees)`);
                         } else {
@@ -226,8 +235,8 @@ export class PortfolioManager {
         if (!this.polyClient || !this.kalshiClient) return;
         try {
             const [realPoly, realKalshi] = await Promise.all([
-                this.polyClient.getCollateralBalance(),
-                this.kalshiClient.getBalance()
+                this.polyClient.getCollateralBalance(), //polycash
+                this.kalshiClient.getBalance() //kalshicash
             ]);
 
             this.polyCash = realPoly;
@@ -348,7 +357,8 @@ export class PortfolioManager {
             totalCost,
             timestamp: Date.now(),
             expiringDate,
-            expectedAnnualizedReturn: EAR
+            expectedAnnualizedReturn: EAR,
+            state: 'open'
         };
 
         this.openPositions.set(pairId, newPosition);
@@ -380,7 +390,7 @@ export class PortfolioManager {
                     $setOnInsert: {
                         expiringDate: pos.expiringDate,
                         expectedAnnualizedReturn: pos.expectedAnnualizedReturn,
-                        state: 'open'
+                        state: pos.state || 'open'
                     }
                 },
                 { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -472,7 +482,7 @@ export class PortfolioManager {
     }
 
     public async evaluateRelayRotation(newCandidateAbsProfit: number, capitalNeeded: number): Promise<boolean> {
-        const openPositions = this.getOpenPositions();
+        let openPositions = this.getOpenPositions().filter(p => !p.state || p.state === 'open');
         if (openPositions.length === 0) return false;
 
         // 1. Sort by absolute expected profit dynamically
@@ -538,7 +548,7 @@ export class PortfolioManager {
 
         logger.info(`[RELAY] 🛡️ Buffer Maintenance: Trade needs $${amountNeeded.toFixed(2)}, shortfall is $${(polyShortfall + kalshiShortfall).toFixed(2)}. Target replenishment: $${targetReplenishment.toFixed(2)}`);
 
-        const openPositions = this.getOpenPositions();
+        let openPositions = this.getOpenPositions().filter(p => !p.state || p.state === 'open');
         openPositions.sort((a, b) => (a.expectedAnnualizedReturn || 0) - (b.expectedAnnualizedReturn || 0));
 
         let cashRecovered = 0;

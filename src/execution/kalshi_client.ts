@@ -279,4 +279,35 @@ export class KalshiClient {
             return [];
         }
     }
+
+    public async isMarketSettled(ticker: string): Promise<boolean> {
+        const timestamp = Date.now();
+        const endpoint = `/markets/${ticker}`;
+        const signaturePath = `/trade-api/v2${endpoint}`;
+
+        try {
+            const signature = this.sign(timestamp, 'GET', signaturePath);
+            const url = `${this.baseUrl}${endpoint}`;
+
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'KALSHI-ACCESS-KEY': this.keyId,
+                    'KALSHI-ACCESS-SIGNATURE': signature,
+                    'KALSHI-ACCESS-TIMESTAMP': timestamp.toString(),
+                }
+            });
+
+            if (!response.ok) {
+                return false;
+            }
+
+            const data = await response.json();
+            return data.market?.status === 'settled';
+        } catch (error: any) {
+            console.error(`[KalshiClient] isMarketSettled error:`, error.message);
+            return false;
+        }
+    }
 }
