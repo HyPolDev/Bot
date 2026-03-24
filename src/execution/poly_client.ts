@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { ClobClient, Side, OrderType, SignatureType } from '@polymarket/clob-client';
 import { ExecutionReceipt } from './types.js';
 import dotenv from 'dotenv';
+import { logger } from '../utils/logger.js';
 
 dotenv.config();
 
@@ -18,6 +19,7 @@ export class PolyClient {
         const proxyAddress = process.env.POLY_PROXY_ADDRESS;
 
         if (!proxyAddress) {
+            logger.error("POLY_PROXY_ADDRESS is not defined in the .env file");
             throw new Error("POLY_PROXY_ADDRESS is not defined in the .env file");
         }
 
@@ -53,7 +55,7 @@ export class PolyClient {
             const signer = new ethers.Wallet(privateKey);
             const proxyAddress = process.env.POLY_PROXY_ADDRESS;
             if (!proxyAddress) {
-                console.warn("[PolyClient] POLY_PROXY_ADDRESS missing, returning 0 balance.");
+                logger.error("[PolyClient] POLY_PROXY_ADDRESS missing, returning 0 balance.");
                 return 0;
             }
 
@@ -68,7 +70,7 @@ export class PolyClient {
 
             return balanceUsd;
         } catch (error: any) {
-            console.error(`[PolyClient] getCollateralBalance error:`, error.message);
+            logger.error(`[PolyClient] getCollateralBalance error`, error.message);
             return 0; // Return safe default
         }
     }
@@ -166,14 +168,14 @@ export class PolyClient {
         try {
             const proxyAddress = process.env.POLY_PROXY_ADDRESS;
             if (!proxyAddress) {
-                console.warn("[PolyClient] POLY_PROXY_ADDRESS missing, returning empty positions.");
+                logger.error("[PolyClient] POLY_PROXY_ADDRESS missing, returning empty positions.");
                 return [];
             }
 
             const res = await fetch(`https://data-api.polymarket.com/positions?user=${proxyAddress}`);
             if (!res.ok) {
                 const errorStr = await res.text();
-                console.error(`[PolyClient] getOpenPositions HTTP Error ${res.status}: ${errorStr}`);
+                logger.error(`[PolyClient] getOpenPositions HTTP Error ${res.status}: ${errorStr}`);
                 return [];
             }
 
@@ -187,7 +189,7 @@ export class PolyClient {
             }
             return [];
         } catch (error: any) {
-            console.error(`[PolyClient] getOpenPositions error:`, error.message);
+            logger.error(`[PolyClient] getOpenPositions error`, error.message);
             return [];
         }
     }
@@ -200,31 +202,31 @@ export class PolyClient {
             // In polymarket gamma API, 'closed' or 'active'==false often indicates resolution/stop trading
             return data.closed === true || data.active === false;
         } catch (error: any) {
-            console.error(`[PolyClient] isMarketResolved error:`, error.message);
+            logger.error(`[PolyClient] isMarketResolved error`, error.message);
             return false;
         }
     }
 
     public async claimWinnings(conditionId: string): Promise<boolean> {
         try {
-            console.log(`[Polymarket] 💰 Redeeming on-chain CTF for condition: ${conditionId}...`);
+            logger.info(`[Polymarket] 💰 Redeeming on-chain CTF for condition: ${conditionId}...`);
             // as per user instructions:
             const tx = await (this.client as any).redeem(conditionId);
-            
+
             if (tx && typeof tx.wait === 'function') {
                 const receipt = await tx.wait();
-                console.log(`[Polymarket] ✅ Redeem confirmed in block: ${receipt.blockNumber}`);
+                logger.info(`[Polymarket] ✅ Redeem confirmed in block: ${receipt.blockNumber}`);
             } else if (typeof tx === 'string' && tx.startsWith('0x')) {
                 const rpcUrl = "https://1rpc.io/matic";
                 const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
                 const receipt = await provider.waitForTransaction(tx, 1);
-                console.log(`[Polymarket] ✅ Redeem confirmed in block ${receipt.blockNumber}`);
+                logger.info(`[Polymarket] ✅ Redeem confirmed in block ${receipt.blockNumber}`);
             } else {
-                console.log(`[Polymarket] ✅ Redeem response received:`, tx);
+                logger.info(`[Polymarket] ✅ Redeem response received:`, tx);
             }
             return true;
         } catch (error: any) {
-            console.error(`[Polymarket] ⚠️ Failed to redeem condition ${conditionId}.`, error.message || error);
+            logger.error(`[Polymarket] ⚠️ Failed to redeem condition ${conditionId}`, error.message || error);
             return false;
         }
     }

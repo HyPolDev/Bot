@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import path from 'path';
+import { logger } from '../utils/logger';
 
 // Helper function to replicate time.sleep()
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -41,6 +42,7 @@ async function getAllActivePolymarketMarkets() {
             }
 
             if (!response.ok) {
+                logger.error(`HTTP Error! Status: ${response.status}`);
                 throw new Error(`HTTP Error! Status: ${response.status}`);
             }
 

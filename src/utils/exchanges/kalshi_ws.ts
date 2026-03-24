@@ -67,7 +67,7 @@ export class KalshiWS {
             })();
 
             if (!privateKey) {
-                console.error("\n[KalshiWS] Missing private key. Set KALSHI_PRIVATE_KEY or KALSHI_KEY_PATH.");
+                logger.error("\n[KalshiWS] Missing private key. Set KALSHI_PRIVATE_KEY or KALSHI_KEY_PATH.");
                 // Retry later in case env is updated at runtime.
                 setTimeout(() => this.connect(), 10000);
                 return;
@@ -83,7 +83,7 @@ export class KalshiWS {
                 saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST
             }, 'base64');
         } catch (e) {
-            console.error("\n[KalshiWS] Failed to generate RSA Signature.", e);
+            logger.error("\n[KalshiWS] Failed to generate RSA Signature.", e);
             return;
         }
 
@@ -110,7 +110,7 @@ export class KalshiWS {
                 const payload = JSON.parse(data.toString());
 
                 if (payload.type === 'error') {
-                    console.error(`[KalshiWS] Error payload: ${JSON.stringify(payload)}`);
+                    logger.error(`[KalshiWS] Error payload: ${JSON.stringify(payload)}`);
                     return;
                 }
 

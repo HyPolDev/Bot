@@ -70,8 +70,10 @@ export class RiskManager {
     }
 
     public getMaxTradeBudget(): number {
-        const totalEquity = this.portfolio.getTotalEquity();
-        const maxEquityPerTrade = this.calculateDynamicRisk(totalEquity, 0.30, 0.02);
-        return totalEquity * maxEquityPerTrade;
+        const polyEquity = this.portfolio.getPolyCash() + this.portfolio.getInvestedPolyCapital();
+        const kalshiEquity = this.portfolio.getKalshiCash() + this.portfolio.getInvestedKalshiCapital();
+        const bottleneckCapital = Math.min(polyEquity, kalshiEquity);
+        const maxEquityPerTrade = this.calculateDynamicRisk(bottleneckCapital, 0.30, 0.02);
+        return bottleneckCapital * maxEquityPerTrade;
     }
 }

@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { ExecutionReceipt } from './types.js';
 import dotenv from 'dotenv';
+import { logger } from '../utils/logger.js';
 
 dotenv.config();
 
@@ -19,6 +20,7 @@ export class KalshiClient {
             try {
                 this.privateKey = fs.readFileSync(process.env.KALSHI_KEY_PATH, 'utf-8');
             } catch (e) {
+                logger.error("Could not read Kalshi Private Key from path:", process.env.KALSHI_KEY_PATH);
                 console.warn("Could not read Kalshi Private Key from path:", process.env.KALSHI_KEY_PATH);
             }
         }
@@ -56,6 +58,7 @@ export class KalshiClient {
 
             if (!response.ok) {
                 const errorStr = await response.text();
+                logger.error(`HTTP Error ${response.status}: ${errorStr}`);
                 throw new Error(`HTTP Error ${response.status}: ${errorStr}`);
             }
 
@@ -64,7 +67,7 @@ export class KalshiClient {
             const balanceCents = data.balance || 0;
             return balanceCents / 100; // Returns in dollars
         } catch (error: any) {
-            console.error(`[KalshiClient] getBalance error:`, error.message);
+            logger.error(`[KalshiClient] getBalance error`, error.message);
             return 0; // Return safe default
         }
     }
@@ -230,12 +233,11 @@ export class KalshiClient {
     public async getOpenPositions(): Promise<{ ticker: string, position: number, market_exposure: number, fees_paid: number, total_traded: number }[]> {
         const timestamp = Date.now();
         const endpoint = '/portfolio/positions';
-        const query = '?count_filter=position'; // Define query explicitly
-        const signaturePath = `/trade-api/v2${endpoint}${query}`; // Include query in signature
+        const signaturePath = `/trade-api/v2${endpoint}`;
 
         try {
             const signature = this.sign(timestamp, 'GET', signaturePath);
-            const url = `${this.baseUrl}${endpoint}${query}`; // Use the exact same path
+            const url = `${this.baseUrl}${endpoint}`;
 
             const response = await fetch(url, {
                 method: 'GET',
@@ -249,7 +251,7 @@ export class KalshiClient {
 
             if (!response.ok) {
                 const errorStr = await response.text();
-                console.error(`[KalshiClient] getOpenPositions HTTP Error ${response.status}: ${errorStr}`);
+                logger.error(`[KalshiClient] getOpenPositions HTTP Error ${response.status}: ${errorStr}`);
                 return [];
             }
 
@@ -275,7 +277,7 @@ export class KalshiClient {
                 })
                 .filter((p: any) => p.ticker && Number.isFinite(p.position) && p.position !== 0);
         } catch (error: any) {
-            console.error(`[KalshiClient] getOpenPositions error:`, error.message);
+            logger.error(`[KalshiClient] getOpenPositions error:`, error.message);
             return [];
         }
     }
@@ -306,7 +308,7 @@ export class KalshiClient {
             const data = await response.json();
             return data.market?.status === 'settled';
         } catch (error: any) {
-            console.error(`[KalshiClient] isMarketSettled error:`, error.message);
+            logger.error(`[KalshiClient] isMarketSettled error:`, error.message);
             return false;
         }
     }

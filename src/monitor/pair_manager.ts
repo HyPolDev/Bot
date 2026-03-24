@@ -86,6 +86,7 @@ export class PairManager {
     public async start() {
         try {
             const polyResponse = await fetch(`https://gamma-api.polymarket.com/markets/${this.pairData.polyMarket.internal_id}`);
+            if (!polyResponse.ok) logger.error(`Gamma API HTTP ${polyResponse.status}`);
             if (!polyResponse.ok) throw new Error(`Gamma API HTTP ${polyResponse.status}`);
 
             const polyMarketData = await polyResponse.json();

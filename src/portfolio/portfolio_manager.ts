@@ -281,6 +281,22 @@ export class PortfolioManager {
         return invested;
     }
 
+    public getInvestedPolyCapital(): number {
+        let invested = 0;
+        for (const position of this.openPositions.values()) {
+            invested += position.polyCost;
+        }
+        return invested;
+    }
+
+    public getInvestedKalshiCapital(): number {
+        let invested = 0;
+        for (const position of this.openPositions.values()) {
+            invested += position.kalshiCost;
+        }
+        return invested;
+    }
+
     public hasOpenPosition(pairId: string): boolean { return this.openPositions.has(pairId); }
     public getPosition(pairId: string): Position | undefined { return this.openPositions.get(pairId); }
     public getPairExposure(pairId: string): number {
