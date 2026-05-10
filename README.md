@@ -8,9 +8,10 @@ This project was built to apply university-level financial theory to real-world 
 ## 📌 Executive Summary
 <img src="./resources/btc15screenshot.png" alt="A mushroom-head robot drinking bubble tea" width="300" height="300" align="right" style="margin-right: 55px;">
 The core objective of this engine is **Capital Preservation and Risk-Free Yield Generation**. By simultaneously purchasing opposing contracts on disparate exchanges, the system locks in a guaranteed $1.00 payout at maturity for a combined cost of less than $1.00. 
-
+<br>
 Rather than taking directional market risk, the engine capitalizes on pricing inefficiencies, bid-ask spread dislocations, and liquidity fragmentation between platforms.
-
+<br>
+<br>
 ## 🏦 Core Financial Mechanics
 
 While the system handles complex asynchronous order routing, the underlying logic is built strictly on institutional portfolio management principles:
