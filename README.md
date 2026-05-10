@@ -6,7 +6,7 @@ A fully automated, market-neutral trading system designed to identify and execut
 This project was built to apply university-level financial theory to real-world market microstructure, focusing heavily on rigorous risk management, capital efficiency, and automated portfolio rebalancing.
 
 ## 📌 Executive Summary
-<img src="./resources/btc15screenshot.png" alt="A mushroom-head robot drinking bubble tea" width="150" height="150" align="left" style="margin-right: 15px;">
+<img src="./resources/btc15screenshot.png" alt="A mushroom-head robot drinking bubble tea" width="150" height="150" align="left" style="margin-right: 55px;">
 The core objective of this engine is **Capital Preservation and Risk-Free Yield Generation**. By simultaneously purchasing opposing contracts on disparate exchanges, the system locks in a guaranteed $1.00 payout at maturity for a combined cost of less than $1.00. 
 
 Rather than taking directional market risk, the engine capitalizes on pricing inefficiencies, bid-ask spread dislocations, and liquidity fragmentation between platforms.
