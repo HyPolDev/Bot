@@ -6,11 +6,15 @@ A fully automated, market-neutral trading system designed to identify and execut
 This project was built to apply university-level financial theory to real-world market microstructure, focusing heavily on rigorous risk management, capital efficiency, and automated portfolio rebalancing.
 
 ## 📌 Executive Summary
-<img src="./resources/btc15screenshot.png" alt="A mushroom-head robot drinking bubble tea" width="300" height="300" align="right" style="margin-right: 55px;">
-The core objective of this engine is **Capital Preservation and Risk-Free Yield Generation**. By simultaneously purchasing opposing contracts on disparate exchanges, the system locks in a guaranteed $1.00 payout at maturity for a combined cost of less than $1.00.\
-\
-Rather than taking directional market risk, the engine capitalizes on pricing inefficiencies, bid-ask spread dislocations, and liquidity fragmentation between platforms.\
-\
+<img src="./resources/btc15screenshot.png" alt="A mushroom-head robot drinking bubble tea" width="320" height="320" align="right" style="margin-right: 55px;">
+The core objective of this engine is **Capital Preservation and Risk-Free Yield Generation**. By simultaneously purchasing opposing contracts on disparate exchanges, the system locks in a guaranteed $1.00 payout at maturity for a combined cost of less than $1.00 and manages new opportunities to maximize capital velocity and annualized returns. Here is a brief summary of the full pipeline, from the market pairs discovery to the portfolio manager system:
+
+At any given moment, there are over 20 billion possible market pairs between the two sites. The engine retrieves all markets from Kalshi and Polymarket, filtering them for desired properties (volume, liquidity, expiration date, etc.). It embeds these markets using a neural network to convert them into normalized semantic vectors and performs a vector search. Out of the 25 million possible pairs remaining after filtration, this search identifies the ones with the highest semantic similarity. This yields a sample small enough to use a Large Language Model (LLM) to judge whether the pairs are genuinely aligned—or inversely aligned. (Evaluated pairs are stored in a database to accelerate future iterations; running this discovery pipeline daily reduces the workload by ~90% and compute by ~70%).
+
+LLMs are not infallible, and relying on AI decision-making to determine if two contracts represent the same market creates a bottleneck. Because our edge is typically a daily 2% of the invested capital (based on our tested sample) and we only find opportunities in 10-15% of the market pairs, we cannot afford an LLM error rate higher than 0.2%. Exceeding this threshold risks capital loss due to incorrect market selection. Currently, the LLM produces a false positive roughly 1 out of 750 times. This issue is further mitigated by a trigger warning that activates upon detecting "too much disparity" between markets, acting as a ban/kill switch.
+
+Once the sample of market pairs is established, the engine opens WebSockets for all markets and creates pair manager instances. These instances identify opportunities and route them to the portfolio manager, which checks the size and price depth of the opportunity, associated fees, and market expiration. It also verifies minimum and maximum approved sizes, ensuring positions do not exceed portfolio risk limits. The system confirms available cash and fires the orders—first to Kalshi (its centralized order book allows for faster fill verification), and then to Polymarket. Following this, the anti-legging system intervenes to prevent one-legged positions caused by partial fills. If cash is insufficient, the system relies on a designated cash buffer, which holds the maximum amount permitted for a single trade. It evaluates whether the new opportunity yields a better return than existing positions (accounting for exit fees); if so, it uses the buffer to execute the order and subsequently liquidates the lowest-performing replaced positions upon confirmation.
+
 ## 🏦 Core Financial Mechanics
 
 While the system handles complex asynchronous order routing, the underlying logic is built strictly on institutional portfolio management principles:
@@ -33,4 +37,4 @@ For a deep dive into the system's asynchronous loops, database schema, and LLM v
 3. Ensure a local or cloud instance of MongoDB is running.
 4. Launch the live dashboard and execution engine via `ts-node src/index.ts`.
 
-*(Note: The system includes a high-fidelity Paper Trading mode to simulate execution latency and order book sweeps without risking live capital).*
+*(Note: The system includes a high-fidelity Paper Trading mode to simulate execution latency and order book sweeps without risking live capital, also the current 15 minute btc markets since those are by far the most atractive for demos).*
